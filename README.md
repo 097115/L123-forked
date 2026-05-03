@@ -30,7 +30,7 @@ Actively developed. Tracking the milestone plan in
 | M6 | Printing (ASCII, PDF, line-printer) and Range Search | ✅ done |
 | M7 | Graphs: 7 chart types, F10 view, SVG/PNG save | ✅ done |
 | M8 | R3.4 WYSIWYG icon panel with mouse support | ✅ done |
-| M9 | Macros: `/X`, `{BRANCH}`, `{IF}`, Learn | planned |
+| M9 | Macros: `/X`, `{BRANCH}`, `{IF}`, Learn | ✅ done |
 | M10 | Polish: startup splash, context help, themes | 🚧 in progress |
 
 API, keybindings, and file paths may still change before v1.0.
@@ -38,6 +38,23 @@ API, keybindings, and file paths may still change before v1.0.
 ---
 
 ## ✦ Install
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install duane1024/l123/l123
+```
+
+Or tap once and install by name:
+
+```bash
+brew tap duane1024/l123
+brew install l123
+```
+
+Upgrade later with `brew upgrade l123`.
+
+### From source
 
 Requires Rust stable (pinned via `rust-toolchain.toml`).
 
