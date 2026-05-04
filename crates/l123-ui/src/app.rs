@@ -10,7 +10,12 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::runtime::{Builder as TokioBuilder, Runtime};
+use tokio::sync::oneshot;
 
 use crossterm::{
     event::{
@@ -20,9 +25,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use l123_core::cell_render::{
-    apply_halign_to_rendered, halign_to_label_prefix, label_text_bounds,
-};
+use l123_core::cell_render::{apply_halign_to_rendered, halign_to_label_prefix, label_text_bounds};
 use l123_core::{
     address::col_to_letters, label::is_value_starter, plan_row_spill, render_label,
     render_value_in_cell, Address, Alignment, Border, CellContents, Comment, CurrencyPosition,
@@ -576,6 +579,13 @@ struct Workbook {
     /// mirror is what POINT typed-buffer name resolution reads, so we
     /// don't need to round-trip through the engine to look up a range.
     named_ranges: HashMap<String, Range>,
+    /// Optional notes attached to named ranges by `/Range Name Note
+    /// Create`. Keyed identically to `named_ranges` (lowercased name).
+    name_notes: HashMap<String, String>,
+    /// Cells that `/Range Unprot` has marked as writable. Cells not
+    /// in this set are "protected" by default. Has no effect unless
+    /// `App::global_protection` is on.
+    cell_unprotected: HashSet<Address>,
 }
 
 impl Workbook {
@@ -620,6 +630,8 @@ impl Workbook {
             current_graph: GraphDef::default(),
             graphs: BTreeMap::new(),
             named_ranges: HashMap::new(),
+            name_notes: HashMap::new(),
+            cell_unprotected: HashSet::new(),
         }
     }
 }
@@ -676,10 +688,24 @@ pub struct App {
     /// rendering. Stored for the status panel; cell_render doesn't
     /// honor it yet.
     zero_display: ZeroDisplay,
-    /// `/Worksheet Global Protection` — disables edits to protected
-    /// cells when On. Stored for the status panel; mutating commands
-    /// don't consult it yet.
+    /// `/Worksheet Global Protection` — when On, edits to cells not
+    /// listed in `Workbook::cell_unprotected` are refused (the input
+    /// is dropped and an error beep fires).
     global_protection: bool,
+    /// Live `/Range Input` constraint. While `Some(range)`, pointer
+    /// movement is restricted to unprotected cells inside `range`.
+    /// Esc clears it.
+    input_range: Option<Range>,
+    /// §4.7 — pending long-running file op. Queued when the user
+    /// commits a `/File Retrieve` filename; mode flips to Wait while
+    /// it's Some. Drained by `tick()`, which the production event
+    /// loop calls each iteration. Ctrl-Break clears it without
+    /// running.
+    pending_async_op: Option<PendingAsyncOp>,
+    /// §4.7 acceptance hook. While true, `tick()` skips the drain so
+    /// transcripts can observe mid-flight WAIT mode. Cleared by
+    /// `test_resume_async_op` or by Ctrl-Break.
+    block_next_async_op: bool,
     /// 1-2-3 GROUP mode: when true, format and row/col operations
     /// propagate across all sheets of the active file. Toggled by
     /// `/Worksheet Global Group Enable|Disable`. Lights the GROUP
@@ -860,6 +886,35 @@ pub struct App {
     /// indicator on the status line; the running macro additionally
     /// shows SST while parked at a step.
     step_mode: bool,
+    /// `/Data Sort` settings — sticky across Sort-menu visits and
+    /// even across separate `/DS` sessions until cleared by Reset.
+    data_sort: DataSortState,
+    /// Which sort-key slot the in-flight Asc/Desc submenu writes
+    /// into, set when `Primary-Key` / `Secondary-Key` POINT commits.
+    pending_sort_key_slot: Option<SortKeySlot>,
+    /// Column of the in-flight sort key, captured from the POINT
+    /// cell that fired the Asc/Desc submenu.
+    pending_sort_key_col: Option<u16>,
+    /// `/Data Regression` settings — sticky across Regression-menu
+    /// visits and across separate `/DR` sessions until cleared.
+    data_regression: DataRegressionState,
+    /// `/Data Parse` settings — sticky across Parse-menu visits and
+    /// across separate `/DP` sessions until cleared by Reset.
+    data_parse: DataParseState,
+    /// `/Data Query` settings — sticky across Query-menu visits and
+    /// across separate `/DQ` sessions until cleared by Reset.
+    data_query: DataQueryState,
+    /// §4.7 — current-thread tokio runtime that backs every long-
+    /// running op via `spawn_blocking`. Owning it on `App` keeps
+    /// the runtime's lifetime tied to the UI's; tests use the same
+    /// handle to `block_on` a parked op to completion.
+    runtime: Runtime,
+    /// PLAN §4.7 cell-count threshold above which F9 recalc routes
+    /// through the WAIT path. Initialized to
+    /// `RECALC_WAIT_CELL_THRESHOLD`; transcripts can lower it via
+    /// `test_set_recalc_wait_threshold` so a 5-cell sheet exercises
+    /// the same code path without seeding 50k cells.
+    recalc_wait_cell_threshold: usize,
 }
 
 /// User-visible identity shown on the startup splash. The renderer
@@ -882,12 +937,76 @@ struct GraphOverlay {
     img: Option<image::DynamicImage>,
 }
 
+/// `/Data Sort` direction: ascending = low→high, descending = high→low.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDir {
+    Ascending,
+    Descending,
+}
+
+/// Which key slot a Primary-Key / Secondary-Key / Extra-Key
+/// Asc/Desc submenu is about to write into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKeySlot {
+    Primary,
+    Secondary,
+    Extra,
+}
+
+/// Persisted `/Data Sort` settings. Sticky across the Sort menu and
+/// across separate `/DS` invocations — Reset is the only way to
+/// clear it short of restarting the session.
+#[derive(Debug, Clone, Copy, Default)]
+struct DataSortState {
+    data_range: Option<Range>,
+    primary: Option<(u16, SortDir)>,
+    secondary: Option<(u16, SortDir)>,
+    extra: Option<(u16, SortDir)>,
+}
+
+/// Persisted `/Data Regression` settings, sticky across the
+/// Regression menu and across separate `/DR` invocations.
+#[derive(Debug, Clone, Copy, Default)]
+struct DataRegressionState {
+    x_range: Option<Range>,
+    y_range: Option<Range>,
+    output_anchor: Option<Address>,
+    intercept_zero: bool,
+}
+
+/// Persisted `/Data Parse` settings — the input column (whose top
+/// row is the format line) and the output anchor.
+#[derive(Debug, Clone, Copy, Default)]
+struct DataParseState {
+    input_range: Option<Range>,
+    output_anchor: Option<Address>,
+}
+
+/// Persisted `/Data Query` settings — three rectangular ranges
+/// that drive Find / Extract / Unique / Del.
+#[derive(Debug, Clone, Copy, Default)]
+struct DataQueryState {
+    input: Option<Range>,
+    criteria: Option<Range>,
+    output: Option<Range>,
+}
+
 /// Which cell kinds `/Range Search` walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchScope {
     Formulas,
     Labels,
     Both,
+}
+
+/// Adjacent-cell direction for `/Range Name Labels`. Each label in
+/// the picked range gets a name pointing one cell in this direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelDirection {
+    Right,
+    Down,
+    Left,
+    Up,
 }
 
 /// Live state of a `/Range Search` session between scope selection
@@ -1112,6 +1231,39 @@ enum JournalEntry {
     },
     /// Restore one sheet's visibility after `/Worksheet Hide`.
     SheetVisibility { sheet: SheetId, prev: SheetState },
+    /// Restore the workbook's named-range map after `/Range Name
+    /// Reset`. The captured pairs are re-defined wholesale on undo
+    /// (engine + UI mirror), preserving names that pre-existed before
+    /// the wipe.
+    RangeNameReset { prev: Vec<(String, Range)> },
+    /// Undo of `/Range Name Labels`: drop the names that were
+    /// successfully created by the command (any pre-existing names
+    /// that were overwritten are captured in `overwritten` and
+    /// restored).
+    RangeNameLabels {
+        created: Vec<String>,
+        overwritten: Vec<(String, Range)>,
+    },
+    /// Restore the workbook's named-range map and notes after
+    /// `/Range Name Undefine`. The single dropped name + range is
+    /// re-defined; the `cell_writes` block carries the cells that the
+    /// formula-rewrite touched, so they can be restored to their
+    /// pre-rewrite source.
+    RangeNameUndefine {
+        name: String,
+        range: Range,
+        note: Option<String>,
+        cell_writes: Vec<(Address, Option<CellContents>)>,
+    },
+    /// Restore a single named-range note after Create or Delete.
+    /// `prev = None` means the name had no note before the command.
+    RangeNameNote { name: String, prev: Option<String> },
+    /// Restore every named-range note after `/Range Name Note Reset`.
+    RangeNameNoteReset { prev: Vec<(String, String)> },
+    /// Restore the per-cell `cell_unprotected` set after `/Range Prot`
+    /// or `/Range Unprot`. Each `(addr, was_unprotected)` pair records
+    /// whether the cell was in the unprotected set before the command.
+    RangeProtection { entries: Vec<(Address, bool)> },
     /// Group of entries popped and applied together — used when
     /// GROUP propagated a single command to multiple sheets.
     Batch(Vec<JournalEntry>),
@@ -1162,6 +1314,179 @@ struct PromptState {
     fresh: bool,
 }
 
+/// §4.7 — a long-running op queued while WAIT mode is active. The
+/// op begins life in `OpState::Queued` (not yet on the tokio
+/// thread); the next `tick()` moves it to `OpState::Running` by
+/// spawning a `spawn_blocking` task. Subsequent ticks poll the
+/// oneshot for completion. Drop the whole struct to cancel — the
+/// shared `progress.cancel` flag lets cooperative workers bail
+/// early.
+struct PendingAsyncOp {
+    /// Verb prefix on control-panel line 3 — e.g. "Loading",
+    /// "Saving", "Importing", "Recalculating". Joined with
+    /// `display_name` for the rendered "Loading foo.csv…" line.
+    verb: &'static str,
+    /// Filename basename or other short noun — rendered after `verb`.
+    /// Empty for ops with no associated file (e.g. recalc).
+    display_name: String,
+    /// Shared progress / cancel state, written by the worker and
+    /// read by the renderer.
+    progress: AsyncProgress,
+    /// State of the op — Queued (not yet on tokio) or Running
+    /// (worker spawned, waiting for result).
+    state: OpState,
+}
+
+impl PendingAsyncOp {
+    /// Control-panel line 3 text. With a `total > 0` progress reading
+    /// we render a fixed-width bar `[████░░] N%`; otherwise just the
+    /// verb + name.
+    fn render_line3(&self) -> String {
+        let head = if self.display_name.is_empty() {
+            format!(" {}…", self.verb)
+        } else {
+            format!(" {} {}…", self.verb, self.display_name)
+        };
+        let total = self.progress.total.load(Ordering::Relaxed);
+        if total == 0 {
+            return head;
+        }
+        let done = self.progress.done.load(Ordering::Relaxed).min(total);
+        let pct = ((done * 100) / total) as u16;
+        let bar = render_progress_bar(done, total, PROGRESS_BAR_CELLS);
+        format!("{head} [{bar}] {pct}%")
+    }
+}
+
+/// Width (in cells) of the rendered `[████░░]` progress bar. Each
+/// cell = `total / N` bytes; partial cells round down.
+const PROGRESS_BAR_CELLS: u32 = 20;
+
+/// Threshold for routing `F9` recalc through WAIT mode (PLAN §4.7).
+/// Below this cell count the recalc stays synchronous so day-to-day
+/// edits don't pay a tokio round-trip.
+const RECALC_WAIT_CELL_THRESHOLD: usize = 50_000;
+
+fn render_progress_bar(done: u64, total: u64, cells: u32) -> String {
+    if total == 0 || cells == 0 {
+        return String::new();
+    }
+    let filled = ((done.saturating_mul(cells as u64)) / total).min(cells as u64) as u32;
+    let mut s = String::with_capacity(cells as usize * 3);
+    for _ in 0..filled {
+        s.push('\u{2588}');
+    }
+    for _ in filled..cells {
+        s.push('\u{2591}');
+    }
+    s
+}
+
+/// Shared state between the UI thread and a worker task — the worker
+/// writes progress and reads `cancel`; the UI thread does the inverse.
+#[derive(Clone, Default)]
+struct AsyncProgress {
+    /// Bytes (or rows) processed so far.
+    done: Arc<AtomicU64>,
+    /// Total bytes (or rows). Zero = indeterminate; render hides the
+    /// bar and shows the verb-only line.
+    total: Arc<AtomicU64>,
+    /// Set by Ctrl-Break. Workers in cooperative loops (CSV row
+    /// scanner, import row scanner) check this between rows and
+    /// return early; ops backed by a single opaque IronCalc call
+    /// (xlsx load, xlsx save, recalc) only honor it before/after.
+    cancel: Arc<AtomicBool>,
+}
+
+/// State machine for `PendingAsyncOp`. The `Queued` payload is
+/// boxed because some variants embed an `IronCalcEngine` (~1KB on
+/// the stack) that would otherwise dominate the enum size.
+enum OpState {
+    /// Worker hasn't been spawned yet. The next `tick()` moves it to
+    /// `Running` (unless `block_next_async_op` is set, which lets
+    /// transcripts observe pre-flight WAIT state).
+    Queued(Box<QueuedOp>),
+    /// Worker spawned; waiting for the oneshot result.
+    Running(oneshot::Receiver<AsyncResult>),
+}
+
+/// What the worker should do — variants own the inputs they need
+/// (path, taken-out engine, etc.) so the spawn-blocking closure has
+/// nothing to borrow from `App`.
+enum QueuedOp {
+    /// `/File Retrieve` — dispatched by extension inside the worker.
+    FileRetrieve { path: PathBuf },
+    /// `/File Save` — engine has been taken out of the workbook
+    /// (placeholder swapped in) and travels with the op.
+    FileSave {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        formula_sources: HashMap<Address, String>,
+    },
+    /// `/File Import Numbers` — workbook engine taken out; the
+    /// worker fills it from the parsed CSV starting at `origin`.
+    FileImportNumbers {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        origin: Address,
+    },
+    /// `/File Import Text` — same as Numbers but each line is a
+    /// single label (no comma-splitting).
+    FileImportText {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        origin: Address,
+    },
+    /// F9 recalc, gated on cell count > `RECALC_WAIT_CELL_THRESHOLD`.
+    Recalc { engine: IronCalcEngine },
+}
+
+/// What the worker hands back over the oneshot. Each variant carries
+/// the engine (or `None` if construction failed before we got one)
+/// plus any cells-cache deltas the main thread should apply.
+enum AsyncResult {
+    /// `/File Retrieve` of an xlsx — the worker built a fresh engine
+    /// from the file. Cells/styles are pulled out of it on the main
+    /// thread (re-using the existing post-load cache rebuild).
+    FileRetrieveXlsx {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        is_wk3: bool,
+    },
+    /// `/File Retrieve` of a csv — the worker built a fresh engine
+    /// pre-populated with the parsed cells; `cells` is the matching
+    /// UI-side cache.
+    FileRetrieveCsv {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        cells: Vec<(Address, CellContents)>,
+    },
+    /// `/File Save` — engine returned, with success or error string.
+    FileSave {
+        engine: IronCalcEngine,
+        path: PathBuf,
+        result: std::result::Result<(), String>,
+    },
+    /// Import op completed (text or numbers). `cells` is the run of
+    /// UI-side entries to merge into `Workbook::cells`.
+    FileImport {
+        engine: IronCalcEngine,
+        cells: Vec<(Address, CellContents)>,
+    },
+    /// F9 recalc done — engine carries the recomputed values.
+    Recalc { engine: IronCalcEngine },
+    /// Worker bailed because of a cancel flag or pre-spawn check.
+    /// Engine is returned so the main thread can put it back.
+    Cancelled { engine: Option<IronCalcEngine> },
+    /// Worker hit an error (file open failed, etc.). Engine is
+    /// returned (when one was taken out) so the workbook isn't
+    /// stranded with a placeholder.
+    Errored {
+        engine: Option<IronCalcEngine>,
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PromptNext {
     /// Then go to POINT and apply `Format { kind, decimals: <buffer> }`.
@@ -1188,6 +1513,17 @@ enum PromptNext {
     RangeNameCreate,
     /// After the user types a name, delete it from the engine.
     RangeNameDelete,
+    /// After the user types a name, drop it from the engine and rewrite
+    /// every formula referencing it to use the literal Excel-form range
+    /// (preserving the cells' values).
+    RangeNameUndefine,
+    /// After the user types a name, ask for a single-line note to attach.
+    RangeNameNoteCreate,
+    /// After the user types a name, ask for the note text body.
+    RangeNameNoteCreateBody,
+    /// After the user types a name, drop just that name's note (leaves
+    /// the name itself untouched).
+    RangeNameNoteDelete,
     /// After the user types a filename, save the workbook to that path
     /// as xlsx.
     FileSaveFilename,
@@ -1301,6 +1637,25 @@ enum PromptNext {
     MacroGetInput {
         numeric: bool,
     },
+    /// `/Data Fill` — first prompt: starting value of the sequence.
+    /// Default is `0`. After commit, descends to `DataFillStep`.
+    DataFillStart {
+        range: Range,
+    },
+    /// `/Data Fill` — second prompt: per-cell increment. Default is
+    /// `1`. After commit, descends to `DataFillStop`.
+    DataFillStep {
+        range: Range,
+        start: f64,
+    },
+    /// `/Data Fill` — third prompt: clamp value. Default is `2047`
+    /// (R3.4a's documented default). After commit, the sequence is
+    /// written into `range` column-major.
+    DataFillStop {
+        range: Range,
+        start: f64,
+        step: f64,
+    },
 }
 
 /// `/Worksheet Titles` axis selector.  Both freezes the rows above
@@ -1402,9 +1757,15 @@ impl PromptNext {
             // 1-2-3 names accept letters, digits, `_`, `.`, and the
             // backslash that prefixes macro autonames (`\A`..`\Z`,
             // `\0`). 15-char max is enforced at commit time.
-            PromptNext::RangeNameCreate | PromptNext::RangeNameDelete => {
+            PromptNext::RangeNameCreate
+            | PromptNext::RangeNameDelete
+            | PromptNext::RangeNameUndefine
+            | PromptNext::RangeNameNoteCreate
+            | PromptNext::RangeNameNoteDelete => {
                 c.is_ascii_alphanumeric() || c == '_' || c == '\\' || c == '.'
             }
+            // Note body is free text; allow anything printable.
+            PromptNext::RangeNameNoteCreateBody => !c.is_control(),
             // GOTO accepts cell-address chars: letters (col), digits
             // (row), and `:` for the optional sheet prefix (`A:B5`).
             PromptNext::Goto => c.is_ascii_alphanumeric() || c == ':',
@@ -1466,6 +1827,12 @@ impl PromptNext {
             | PromptNext::WgdPrinterPgLength => c.is_ascii_digit(),
             PromptNext::WgdPrinterSetup => c != '\n' && c != '\t',
             PromptNext::WgdPrinterName => c.is_ascii_alphanumeric() || c == '_' || c == '-',
+            // /Data Fill takes signed real numbers — digits, decimal
+            // point, and a leading sign. We don't validate placement
+            // here; the commit handler parses with f64::from_str.
+            PromptNext::DataFillStart { .. }
+            | PromptNext::DataFillStep { .. }
+            | PromptNext::DataFillStop { .. } => c.is_ascii_digit() || matches!(c, '.' | '-' | '+'),
         }
     }
 }
@@ -1479,6 +1846,255 @@ fn parse_margin(buffer: &str, prev: u16) -> u16 {
 /// semantics (`/`, period-free submenus). `/` is fine; `.` is fine.
 fn is_path_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '\\' | ' ' | '~')
+}
+
+/// `/Data Query` criterion-vs-input comparator. Numbers compare
+/// numerically; labels and `Value::Text` constants compare
+/// case-insensitively; an empty input cell never matches a
+/// non-empty criterion. Anything else (formula criterion, date,
+/// error) returns `false` — the MVP slice doesn't evaluate
+/// criterion expressions.
+fn cell_values_equal_for_query(crit: &CellContents, input: Option<&CellContents>) -> bool {
+    fn as_text_lower(c: &CellContents) -> Option<String> {
+        match c {
+            CellContents::Label { text, .. } => Some(text.to_ascii_lowercase()),
+            CellContents::Constant(Value::Text(s)) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        }
+    }
+    fn as_number(c: &CellContents) -> Option<f64> {
+        match c {
+            CellContents::Constant(Value::Number(n)) => Some(*n),
+            CellContents::Formula {
+                cached_value: Some(Value::Number(n)),
+                ..
+            } => Some(*n),
+            _ => None,
+        }
+    }
+    match (crit, input) {
+        (_, None) => false,
+        (CellContents::Constant(Value::Number(cn)), Some(in_c)) => as_number(in_c)
+            .map(|n| (n - cn).abs() < 1e-12)
+            .unwrap_or(false),
+        (c, Some(in_c)) => {
+            if let (Some(a), Some(b)) = (as_text_lower(c), as_text_lower(in_c)) {
+                a == b
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Auto-generate a `/Data Parse` format line from a sample data
+/// label. Each char is classified (digits + sign + dot → `V`,
+/// whitespace → space gap, anything else → `L`); the first char
+/// of each run emits the marker, subsequent chars in the same run
+/// emit `>`. Whitespace gaps are preserved verbatim so the field
+/// boundaries align character-for-character with the source label.
+fn build_format_line(label: &str) -> String {
+    let mut out = String::from("|");
+    let mut prev_class: Option<char> = None;
+    for c in label.chars() {
+        let class = if c.is_ascii_digit() || matches!(c, '.' | '-' | '+') {
+            'V'
+        } else if c.is_whitespace() {
+            ' '
+        } else {
+            'L'
+        };
+        if Some(class) != prev_class {
+            out.push(class);
+        } else if class == ' ' {
+            out.push(' ');
+        } else {
+            out.push('>');
+        }
+        prev_class = Some(class);
+    }
+    out
+}
+
+/// `/Data Parse` format-line field kind. Each new field marker
+/// (L/V/D/T/S) opens a field that extends through subsequent `>`
+/// continuation chars until the next marker (or end of line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatField {
+    Label,
+    Value,
+    Date,
+    Time,
+    Skip,
+}
+
+/// Parse a Lotus-style format line into a list of fields. The
+/// leading `|` is consumed; each marker char (L/V/D/T/S) opens a
+/// new field at the current character position, and each `>`
+/// extends the current field. Returns `(start_char, end_char,
+/// kind)` — half-open byte-position-as-char-index ranges.
+fn parse_format_line(fl: &str) -> Vec<(usize, usize, FormatField)> {
+    let body: Vec<char> = if let Some(rest) = fl.strip_prefix('|') {
+        rest.chars().collect()
+    } else {
+        fl.chars().collect()
+    };
+    let mut fields = Vec::new();
+    let mut current: Option<(usize, FormatField)> = None;
+    for (i, &c) in body.iter().enumerate() {
+        let kind = match c {
+            'L' | 'l' => Some(FormatField::Label),
+            'V' | 'v' => Some(FormatField::Value),
+            'D' | 'd' => Some(FormatField::Date),
+            'T' | 't' => Some(FormatField::Time),
+            'S' | 's' => Some(FormatField::Skip),
+            _ => None,
+        };
+        if let Some(k) = kind {
+            if let Some((start, ty)) = current.take() {
+                fields.push((start, i, ty));
+            }
+            current = Some((i, k));
+        }
+        // `>` and any other char (space, etc.) just extend the
+        // current field; if no field is open, they're ignored.
+    }
+    if let Some((start, ty)) = current.take() {
+        fields.push((start, body.len(), ty));
+    }
+    fields
+}
+
+/// Round `n` to `sig` significant decimal digits — used by the
+/// matrix kernels to suppress IEEE-754 noise (`0.6000000000000001`
+/// → `0.6`) before storing into cells where General-format display
+/// would otherwise leak the trailing junk.
+fn round_to_significant(n: f64, sig: i32) -> f64 {
+    if n == 0.0 || !n.is_finite() {
+        return n;
+    }
+    let magnitude = n.abs().log10().floor() as i32;
+    let factor = 10f64.powi(sig - 1 - magnitude);
+    (n * factor).round() / factor
+}
+
+/// In-place Gauss-Jordan elimination with partial pivoting on the
+/// augmented matrix `[mat | I]`. Returns the inverse, or `None`
+/// when `mat` is singular (no usable pivot found in a column).
+fn gauss_jordan_invert(mut mat: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
+    let n = mat.len();
+    if n == 0 || mat.iter().any(|r| r.len() != n) {
+        return None;
+    }
+    let mut inv: Vec<Vec<f64>> = (0..n)
+        .map(|i| {
+            let mut row = vec![0.0_f64; n];
+            row[i] = 1.0;
+            row
+        })
+        .collect();
+    for col in 0..n {
+        let mut pivot = col;
+        for r in col + 1..n {
+            if mat[r][col].abs() > mat[pivot][col].abs() {
+                pivot = r;
+            }
+        }
+        if mat[pivot][col].abs() < 1e-12 {
+            return None;
+        }
+        if pivot != col {
+            mat.swap(col, pivot);
+            inv.swap(col, pivot);
+        }
+        let p = mat[col][col];
+        for c in 0..n {
+            mat[col][c] /= p;
+            inv[col][c] /= p;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let factor = mat[r][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for c in 0..n {
+                mat[r][c] -= factor * mat[col][c];
+                inv[r][c] -= factor * inv[col][c];
+            }
+        }
+    }
+    Some(inv)
+}
+
+/// Build an apostrophe-prefixed label cell. Convenience for code
+/// paths (e.g. `/Data Regression` output) that need to write
+/// header strings into the grid.
+fn label_cell(text: &str) -> CellContents {
+    CellContents::Label {
+        prefix: LabelPrefix::Apostrophe,
+        text: text.into(),
+    }
+}
+
+/// Comparator used by `/Data Sort` for two key cells. Numbers
+/// compare numerically, labels lexicographically, and a missing
+/// (empty) cell sorts after any populated cell — matching 1-2-3's
+/// "blanks last in ascending sort" rule. Mixed numeric/label keys
+/// put numbers before labels.
+fn compare_cell_contents(a: Option<&CellContents>, b: Option<&CellContents>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn rank(c: Option<&CellContents>) -> u8 {
+        match c {
+            Some(CellContents::Constant(Value::Number(_))) => 0,
+            Some(CellContents::Formula { cached_value, .. }) => match cached_value {
+                Some(Value::Number(_)) => 0,
+                Some(Value::Text(_)) => 1,
+                _ => 2,
+            },
+            Some(CellContents::Label { .. }) | Some(CellContents::Constant(Value::Text(_))) => 1,
+            _ => 2,
+        }
+    }
+    fn number_of(c: Option<&CellContents>) -> Option<f64> {
+        match c {
+            Some(CellContents::Constant(Value::Number(n))) => Some(*n),
+            Some(CellContents::Formula {
+                cached_value: Some(Value::Number(n)),
+                ..
+            }) => Some(*n),
+            _ => None,
+        }
+    }
+    fn text_of(c: Option<&CellContents>) -> Option<String> {
+        match c {
+            Some(CellContents::Label { text, .. }) => Some(text.clone()),
+            Some(CellContents::Constant(Value::Text(s))) => Some(s.clone()),
+            Some(CellContents::Formula {
+                cached_value: Some(Value::Text(s)),
+                ..
+            }) => Some(s.clone()),
+            _ => None,
+        }
+    }
+    let ra = rank(a);
+    let rb = rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    if ra == 0 {
+        let na = number_of(a).unwrap_or(0.0);
+        let nb = number_of(b).unwrap_or(0.0);
+        return na.partial_cmp(&nb).unwrap_or(Ordering::Equal);
+    }
+    if ra == 1 {
+        let ta = text_of(a).unwrap_or_default();
+        let tb = text_of(b).unwrap_or_default();
+        return ta.cmp(&tb);
+    }
+    Ordering::Equal
 }
 
 /// Resolve which destination anchors a `/Copy` should paste into,
@@ -1525,6 +2141,139 @@ fn resolve_save_path(input: &str) -> PathBuf {
         p.set_extension("xlsx");
     }
     p
+}
+
+/// 1-2-3 R3.4a range-name rules: 1..=15 chars, first char is a
+/// letter, no embedded whitespace or special characters that would
+/// look like operators or sheet refs (`+ - * / ^ ( ) , ; : . #
+/// & < > = !`).
+fn is_valid_range_name(s: &str) -> bool {
+    let len = s.chars().count();
+    if !(1..=15).contains(&len) {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Render a `Range` in 1-2-3 source form. Same-sheet ranges get a
+/// single sheet prefix on the start address (`A:A1..A1`); cross-sheet
+/// ranges get prefixes on both ends. The compact same-sheet form
+/// matches what /RNT writes in 1-2-3 R3.4a.
+fn range_to_lotus_form(r: Range) -> String {
+    let r = r.normalized();
+    if r.start.sheet == r.end.sheet {
+        format!("{}..{}", r.start.display_full(), r.end.display_short())
+    } else {
+        format!("{}..{}", r.start.display_full(), r.end.display_full())
+    }
+}
+
+/// True if `expr` (a 1-2-3-shape formula source) references the
+/// range name `name` (compared case-insensitively, key already
+/// lowercased) as a whole word — adjacent chars must be non-name
+/// characters so `tax` does not match `taxes` or `tax_rate`.
+fn formula_uses_name(expr: &str, name: &str) -> bool {
+    let lower = expr.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let target = name.as_bytes();
+    if target.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while i + target.len() <= bytes.len() {
+        if &bytes[i..i + target.len()] == target {
+            let before = if i == 0 { None } else { Some(bytes[i - 1]) };
+            let after = bytes.get(i + target.len()).copied();
+            let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
+            if before.is_none_or(|b| !is_word(b)) && after.is_none_or(|b| !is_word(b)) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Replace any formula cell with its cached value (used by /Range
+/// Value and /Range Trans). Empty cells stay empty; non-formula
+/// cells are passed through unchanged.
+fn freeze_to_value(c: Option<CellContents>) -> CellContents {
+    match c {
+        Some(CellContents::Formula {
+            cached_value: Some(v),
+            ..
+        }) => CellContents::Constant(v),
+        Some(CellContents::Formula {
+            cached_value: None, ..
+        })
+        | None => CellContents::Empty,
+        Some(other) => other,
+    }
+}
+
+/// Greedy word-wrap of `text` into chunks no wider than `width`
+/// columns. Words longer than `width` are emitted on their own line
+/// and may exceed the limit (1-2-3 R3.4a same-cell behavior — long
+/// tokens spill rather than break mid-word).
+fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+            continue;
+        }
+        if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// Replace whole-word occurrences of `name` (case-insensitive,
+/// already lowercase) in `expr` with `replacement`. Mirrors the
+/// matching rules of `formula_uses_name`.
+fn replace_name_in_formula(expr: &str, name: &str, replacement: &str) -> String {
+    if name.is_empty() {
+        return expr.to_string();
+    }
+    let lower = expr.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+    let target = name.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
+    let mut out = String::with_capacity(expr.len());
+    let src = expr.as_bytes();
+    let mut i = 0;
+    while i < src.len() {
+        let matches_here = i + target.len() <= src.len()
+            && lower_bytes[i..i + target.len()] == *target
+            && (i == 0 || !is_word(lower_bytes[i - 1]))
+            && lower_bytes
+                .get(i + target.len())
+                .copied()
+                .is_none_or(|b| !is_word(b));
+        if matches_here {
+            out.push_str(replacement);
+            i += target.len();
+        } else {
+            out.push(src[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Format one row of the /File List overlay: name left-padded into
@@ -2030,6 +2779,47 @@ enum PendingCommand {
     /// `pending_name` on App carries the name; on commit, define it over
     /// the selected range.
     RangeNameCreate,
+    /// POINT step of `/Range Name Labels <Direction>`. On commit, walk
+    /// every label cell in the selected range and define a 1-cell
+    /// range name (the label's text) pointing at the adjacent cell in
+    /// `direction`.
+    RangeNameLabels {
+        direction: LabelDirection,
+    },
+    /// POINT step of `/Range Name Table`. On commit, dump the active
+    /// file's named-range table into a 2-column block anchored at the
+    /// selected cell.
+    RangeNameTable,
+    /// POINT step of `/Range Name Note Table`. On commit, dump the
+    /// names-with-notes table into a 3-column block.
+    RangeNameNoteTable,
+    /// POINT step of `/Range Prot` (`unprotected = false`) or
+    /// `/Range Unprot` (`unprotected = true`). On commit, the
+    /// per-cell `cell_unprotected` flag is updated for every cell
+    /// in the selected range.
+    RangeProtect {
+        unprotected: bool,
+    },
+    /// POINT step of `/Range Input`. On commit, enter Input mode
+    /// constrained to unprotected cells in the selected range.
+    RangeInput,
+    /// POINT step of `/Range Value`: pick the source range to copy
+    /// (formulas → values).
+    RangeValueFrom,
+    /// POINT step of `/Range Value`: pick the destination anchor.
+    RangeValueTo {
+        src: Range,
+    },
+    /// POINT step of `/Range Trans`: pick the source range.
+    RangeTransFrom,
+    /// POINT step of `/Range Trans`: pick the destination anchor.
+    RangeTransTo {
+        src: Range,
+    },
+    /// POINT step of `/Range Justify`: pick the column block to
+    /// reflow. Width is derived from the first cell's column width;
+    /// height grows downward as needed (within the block).
+    RangeJustify,
     /// `pending_xtract_path` on App carries the destination path; on
     /// commit, extract the selected range into a new workbook file.
     FileXtractRange {
@@ -2075,6 +2865,93 @@ enum PendingCommand {
     /// selected range as the destination for Alt-F5 LEARN
     /// recordings.
     WorksheetLearnRange,
+    /// POINT step of `/Data Fill`. On commit, kick off the
+    /// Start → Step → Stop prompt chain that culminates in the
+    /// sequence write.
+    DataFillRange,
+    /// POINT step of `/Data Sort Data-Range`. On commit, store the
+    /// selected range on `App.data_sort` and re-enter the Sort menu.
+    DataSortDataRange,
+    /// POINT step of `/Data Sort Primary-Key` / `Secondary-Key` —
+    /// the selected cell's column becomes the key column. Which slot
+    /// is being set lives on `App.pending_sort_key_slot`.
+    DataSortKey,
+    /// First POINT of `/Data Distribution` — the values range. On
+    /// commit, descend into [`PendingCommand::DataDistributionBins`]
+    /// to collect the bin column.
+    DataDistributionValues,
+    /// Second POINT of `/Data Distribution` — the bin range. Must
+    /// be a single column; on commit, write the frequency counts to
+    /// the column immediately right of the bins.
+    DataDistributionBins {
+        values: Range,
+    },
+    /// POINT step of `/Data Regression X-Range`.
+    DataRegressionXRange,
+    /// POINT step of `/Data Regression Y-Range`.
+    DataRegressionYRange,
+    /// POINT step of `/Data Regression Output-Range`. Only the
+    /// top-left of the picked range is used as the output anchor.
+    DataRegressionOutputRange,
+    /// First POINT of `/Data Matrix Invert` — square matrix to
+    /// invert. On commit, descend into
+    /// [`PendingCommand::DataMatrixInvertOutput`].
+    DataMatrixInvertInput,
+    /// Output-anchor POINT of `/Data Matrix Invert` — only the
+    /// pointer position is used.
+    DataMatrixInvertOutput {
+        source: Range,
+    },
+    /// First POINT of `/Data Matrix Multiply` — matrix A.
+    DataMatrixMultiplyA,
+    /// Second POINT of `/Data Matrix Multiply` — matrix B
+    /// (`cols(A)` must equal `rows(B)`).
+    DataMatrixMultiplyB {
+        a: Range,
+    },
+    /// Output-anchor POINT of `/Data Matrix Multiply` — only the
+    /// pointer position is used.
+    DataMatrixMultiplyOutput {
+        a: Range,
+        b: Range,
+    },
+    /// POINT step of `/Data Parse Input-Column` — single column
+    /// containing the format-line label at the top and data rows
+    /// below.
+    DataParseInputColumn,
+    /// POINT step of `/Data Parse Output-Range` — only the pointer
+    /// position is used as the output top-left.
+    DataParseOutputRange,
+    /// First POINT of `/Data Table 1` — the rectangular table range.
+    /// Top row is the corner + formulas; left column is the corner +
+    /// variable values; body is filled by the executor.
+    DataTable1Range,
+    /// Second POINT of `/Data Table 1` — Input cell 1. Variable
+    /// values from the table's left column are substituted here
+    /// before each formula re-evaluation.
+    DataTable1Input1 {
+        range: Range,
+    },
+    /// First POINT of `/Data Table 2` — table range. Corner cell
+    /// holds the formula; left column = var-1, top row = var-2.
+    DataTable2Range,
+    /// Second POINT of `/Data Table 2` — Input cell 1 (left-column
+    /// values substitute here).
+    DataTable2Input1 {
+        range: Range,
+    },
+    /// Third POINT of `/Data Table 2` — Input cell 2 (top-row
+    /// values substitute here). On commit, run the executor.
+    DataTable2Input2 {
+        range: Range,
+        input1: Address,
+    },
+    /// POINT step of `/Data Query Input`.
+    DataQueryInput,
+    /// POINT step of `/Data Query Criteria`.
+    DataQueryCriteria,
+    /// POINT step of `/Data Query Output`.
+    DataQueryOutput,
 }
 
 impl PendingCommand {
@@ -2091,6 +2968,17 @@ impl PendingCommand {
             PendingCommand::RangeAlignment { .. } => "Enter range for alignment:",
             PendingCommand::RangeColor { .. } => "Enter range for color:",
             PendingCommand::RangeNameCreate => "Enter range for the named range:",
+            PendingCommand::RangeNameLabels { .. } => "Enter range of labels:",
+            PendingCommand::RangeNameTable => "Enter cell to write table to:",
+            PendingCommand::RangeNameNoteTable => "Enter cell to write notes table to:",
+            PendingCommand::RangeProtect { unprotected: true } => "Enter range to UNPROTECT:",
+            PendingCommand::RangeProtect { unprotected: false } => "Enter range to RE-PROTECT:",
+            PendingCommand::RangeInput => "Enter input range:",
+            PendingCommand::RangeValueFrom => "Enter range to copy AS VALUES FROM:",
+            PendingCommand::RangeValueTo { .. } => "Enter range to copy TO:",
+            PendingCommand::RangeTransFrom => "Enter range to TRANSPOSE FROM:",
+            PendingCommand::RangeTransTo { .. } => "Enter range to TRANSPOSE TO:",
+            PendingCommand::RangeJustify => "Enter range to justify:",
             PendingCommand::FileXtractRange { .. } => "Enter range to extract:",
             PendingCommand::PrintFileRange => "Enter range to print:",
             PendingCommand::RangeSearchRange { .. } => "Enter search range:",
@@ -2099,6 +2987,29 @@ impl PendingCommand {
             PendingCommand::ColumnRangeResetWidth => "Enter range of columns to reset:",
             PendingCommand::ColumnHide => "Enter range of columns to hide:",
             PendingCommand::ColumnDisplay => "Enter range of columns to display:",
+            PendingCommand::DataFillRange => "Enter fill range:",
+            PendingCommand::DataSortDataRange => "Enter data-range to sort:",
+            PendingCommand::DataSortKey => "Enter cell in primary/secondary key column:",
+            PendingCommand::DataDistributionValues => "Enter values range:",
+            PendingCommand::DataDistributionBins { .. } => "Enter bin range (single column):",
+            PendingCommand::DataRegressionXRange => "Enter X-range (independent variable):",
+            PendingCommand::DataRegressionYRange => "Enter Y-range (dependent variable):",
+            PendingCommand::DataRegressionOutputRange => "Enter output-range top-left:",
+            PendingCommand::DataMatrixInvertInput => "Enter square matrix to invert:",
+            PendingCommand::DataMatrixInvertOutput { .. } => "Enter output-range top-left:",
+            PendingCommand::DataMatrixMultiplyA => "Enter first matrix:",
+            PendingCommand::DataMatrixMultiplyB { .. } => "Enter second matrix:",
+            PendingCommand::DataMatrixMultiplyOutput { .. } => "Enter output-range top-left:",
+            PendingCommand::DataParseInputColumn => "Enter input column (with format-line row):",
+            PendingCommand::DataParseOutputRange => "Enter output-range top-left:",
+            PendingCommand::DataTable1Range => "Enter table range:",
+            PendingCommand::DataTable1Input1 { .. } => "Enter Input cell 1:",
+            PendingCommand::DataTable2Range => "Enter table range:",
+            PendingCommand::DataTable2Input1 { .. } => "Enter Input cell 1:",
+            PendingCommand::DataTable2Input2 { .. } => "Enter Input cell 2:",
+            PendingCommand::DataQueryInput => "Enter input range (with field-name header row):",
+            PendingCommand::DataQueryCriteria => "Enter criteria range:",
+            PendingCommand::DataQueryOutput => "Enter output range:",
             // Free mouse-drag selection has no prompt — line 3 keeps
             // showing the live range, but no command label is shown.
             PendingCommand::MouseSelect => "",
@@ -2170,6 +3081,9 @@ impl App {
             recalc_pending: false,
             zero_display: ZeroDisplay::No,
             global_protection: false,
+            input_range: None,
+            pending_async_op: None,
+            block_next_async_op: false,
             group_mode: false,
             undo_enabled: true,
             clock_display: ClockDisplay::default(),
@@ -2215,6 +3129,35 @@ impl App {
             learn_recording: false,
             learn_buffer: String::new(),
             step_mode: false,
+            data_sort: DataSortState::default(),
+            pending_sort_key_slot: None,
+            pending_sort_key_col: None,
+            data_regression: DataRegressionState::default(),
+            data_parse: DataParseState::default(),
+            data_query: DataQueryState::default(),
+            runtime: TokioBuilder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("tokio current-thread runtime init"),
+            recalc_wait_cell_threshold: RECALC_WAIT_CELL_THRESHOLD,
+        }
+    }
+
+    /// §4.7 acceptance hook — lowers (or raises) the F9-recalc cell-
+    /// count threshold so a small transcript can exercise the WAIT
+    /// path. No-op outside tests; production code never calls this.
+    pub fn test_set_recalc_wait_threshold(&mut self, n: usize) {
+        self.recalc_wait_cell_threshold = n;
+    }
+
+    /// §4.7 acceptance hook — write synthetic progress numbers to
+    /// the currently-pending async op's shared state so a transcript
+    /// can render-and-assert the `[████░░] N%` bar without having
+    /// to time the worker. No-op when nothing is queued.
+    pub fn test_seed_async_progress(&mut self, done: u64, total: u64) {
+        if let Some(op) = self.pending_async_op.as_ref() {
+            op.progress.done.store(done, Ordering::Relaxed);
+            op.progress.total.store(total, Ordering::Relaxed);
         }
     }
 
@@ -2320,6 +3263,300 @@ impl App {
         self.wb().dirty
     }
 
+    /// §4.7 acceptance hook: park the next async op in `Queued`
+    /// state so a transcript can observe mid-flight WAIT mode and
+    /// pre-spawn cancellation. Sticky until `test_resume_async_op`
+    /// or Ctrl-Break clears it.
+    pub fn test_block_next_async_op(&mut self) {
+        self.block_next_async_op = true;
+    }
+
+    /// §4.7 acceptance hook: clear the block and run the parked op
+    /// to completion synchronously, applying the result before
+    /// returning. Equivalent to ticking until the queue drains, but
+    /// uses the runtime's `block_on` so xlsx loads / saves don't
+    /// busy-loop.
+    pub fn test_resume_async_op(&mut self) {
+        self.block_next_async_op = false;
+        self.tick_inner(true);
+    }
+
+    /// Acceptance-harness companion to `tick`: blocks until the
+    /// worker returns instead of polling non-blocking. Respects
+    /// `block_next_async_op` so a transcript that called
+    /// `BLOCK_NEXT_OP` keeps the op parked. Mirrors the
+    /// pre-§4.7 sync drain semantics so existing transcripts that
+    /// don't care about WAIT mid-flight stay green without
+    /// sprinkling `RESUME_OP` everywhere.
+    pub fn drain_async_op_blocking(&mut self) {
+        self.tick_inner(true);
+    }
+
+    /// §4.7 — drain a queued long-running op. The production event
+    /// loop calls this each iteration after rendering. Non-blocking:
+    /// if the worker is still running the op stays in WAIT and the
+    /// next render frame sees updated progress. Gated by
+    /// `block_next_async_op` so tests can hold the queue at the
+    /// pre-spawn boundary indefinitely.
+    pub fn tick(&mut self) {
+        self.tick_inner(false);
+    }
+
+    /// Shared body of `tick` and `test_resume_async_op`. With
+    /// `wait == false` we poll the worker non-blocking; with
+    /// `wait == true` we block on the oneshot until the worker
+    /// returns.
+    fn tick_inner(&mut self, wait: bool) {
+        if self.block_next_async_op {
+            return;
+        }
+        let Some(op) = self.pending_async_op.take() else {
+            return;
+        };
+        let PendingAsyncOp {
+            verb,
+            display_name,
+            progress,
+            state,
+        } = op;
+        let mut rx = match state {
+            OpState::Queued(queued) => self.spawn_async_op(*queued, progress.clone()),
+            OpState::Running(rx) => rx,
+        };
+        let result = if wait {
+            self.runtime.block_on(&mut rx).ok()
+        } else {
+            match rx.try_recv() {
+                Ok(r) => Some(r),
+                Err(oneshot::error::TryRecvError::Empty) => None,
+                Err(oneshot::error::TryRecvError::Closed) => Some(AsyncResult::Errored {
+                    engine: None,
+                    message: "worker task dropped without result".to_string(),
+                }),
+            }
+        };
+        match result {
+            None => {
+                self.pending_async_op = Some(PendingAsyncOp {
+                    verb,
+                    display_name,
+                    progress,
+                    state: OpState::Running(rx),
+                });
+            }
+            Some(res) => {
+                self.apply_async_result(res);
+                if matches!(self.mode, Mode::Wait) {
+                    self.mode = Mode::Ready;
+                }
+            }
+        }
+    }
+
+    /// Spawn the worker for a queued op on the tokio blocking pool;
+    /// returns the oneshot receiver the main thread polls in `tick`.
+    fn spawn_async_op(
+        &self,
+        queued: QueuedOp,
+        progress: AsyncProgress,
+    ) -> oneshot::Receiver<AsyncResult> {
+        let (tx, rx) = oneshot::channel();
+        match queued {
+            QueuedOp::FileRetrieve { path } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_file_retrieve(path, progress));
+                });
+            }
+            QueuedOp::FileSave {
+                engine,
+                path,
+                formula_sources,
+            } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_file_save(engine, path, formula_sources, progress));
+                });
+            }
+            QueuedOp::FileImportNumbers {
+                engine,
+                path,
+                origin,
+            } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_file_import(
+                        engine, path, origin, progress, /* numeric_split = */ true,
+                    ));
+                });
+            }
+            QueuedOp::FileImportText {
+                engine,
+                path,
+                origin,
+            } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_file_import(
+                        engine, path, origin, progress, /* numeric_split = */ false,
+                    ));
+                });
+            }
+            QueuedOp::Recalc { engine } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_recalc(engine, progress));
+                });
+            }
+        }
+        rx
+    }
+
+    /// Apply a worker's result to App state. Mode-flip back to READY
+    /// happens in `tick_inner` once this returns.
+    fn apply_async_result(&mut self, res: AsyncResult) {
+        match res {
+            AsyncResult::FileRetrieveXlsx {
+                engine,
+                path,
+                is_wk3,
+            } => {
+                self.wb_mut().engine = engine;
+                self.repopulate_after_xlsx_load(path, is_wk3);
+                self.try_autoexec();
+            }
+            AsyncResult::FileRetrieveCsv {
+                engine,
+                path,
+                cells,
+            } => {
+                // Mirror `execute_file_new`'s wipe (sans the engine
+                // swap, which we do explicitly below) so a /FR onto
+                // a dirty workbook lands at A:A1 with no leftover
+                // styles or pending modal state.
+                self.wb_mut().cells.clear();
+                self.wb_mut().cell_formats.clear();
+                self.wb_mut().cell_text_styles.clear();
+                self.wb_mut().cell_alignments.clear();
+                self.wb_mut().cell_fills.clear();
+                self.wb_mut().cell_font_styles.clear();
+                self.wb_mut().cell_borders.clear();
+                self.wb_mut().comments.clear();
+                self.wb_mut().merges.clear();
+                self.wb_mut().frozen.clear();
+                self.wb_mut().sheet_states.clear();
+                self.wb_mut().tables.clear();
+                self.wb_mut().sheet_colors.clear();
+                self.wb_mut().col_widths.clear();
+                self.wb_mut().default_col_width = 9;
+                self.wb_mut().hidden_cols.clear();
+                self.entry = None;
+                self.wb_mut().pointer = Address::A1;
+                self.wb_mut().viewport_col_offset = 0;
+                self.wb_mut().viewport_row_offset = 0;
+                self.recalc_pending = false;
+                self.wb_mut().engine = engine;
+                for (a, c) in cells {
+                    self.wb_mut().cells.insert(a, c);
+                }
+                self.refresh_formula_caches();
+                self.wb_mut().active_path = Some(path);
+                self.wb_mut().dirty = false;
+                self.try_autoexec();
+            }
+            AsyncResult::FileSave {
+                engine,
+                path,
+                result,
+            } => {
+                self.wb_mut().engine = engine;
+                if result.is_ok() {
+                    self.wb_mut().active_path = Some(path);
+                    self.wb_mut().dirty = false;
+                } else if let Err(msg) = result {
+                    self.set_error(format!("Cannot save: {msg}"));
+                }
+            }
+            AsyncResult::FileImport { engine, cells } => {
+                self.wb_mut().engine = engine;
+                for (a, c) in cells {
+                    self.wb_mut().cells.insert(a, c);
+                }
+                self.refresh_formula_caches();
+            }
+            AsyncResult::Recalc { engine } => {
+                self.wb_mut().engine = engine;
+                self.refresh_formula_caches();
+                self.recalc_pending = false;
+            }
+            AsyncResult::Cancelled { engine } => {
+                if let Some(e) = engine {
+                    self.wb_mut().engine = e;
+                }
+            }
+            AsyncResult::Errored { engine, message } => {
+                if let Some(e) = engine {
+                    self.wb_mut().engine = e;
+                }
+                self.set_error(message);
+            }
+        }
+    }
+
+    /// Queue a long-running op and flip into WAIT mode. The next
+    /// `tick()` spawns the worker (unless `block_next_async_op` is
+    /// set, which holds it at the pre-spawn boundary for tests).
+    fn queue_async_op(&mut self, verb: &'static str, display_name: String, queued: QueuedOp) {
+        self.pending_async_op = Some(PendingAsyncOp {
+            verb,
+            display_name,
+            progress: AsyncProgress::default(),
+            state: OpState::Queued(Box::new(queued)),
+        });
+        self.mode = Mode::Wait;
+    }
+
+    /// SPEC §7 / §4.7: Ctrl-Break aborts an in-flight long op. For
+    /// a Queued op this is instant — the op never spawns. For a
+    /// Running op we set the cancel flag and synchronously wait for
+    /// the worker to return so the main thread can put back any
+    /// engine that was moved out (preventing a stranded placeholder
+    /// engine in the workbook). Returns true when an op was cancelled.
+    fn cancel_pending_async_op(&mut self) -> bool {
+        let Some(op) = self.pending_async_op.take() else {
+            return false;
+        };
+        self.block_next_async_op = false;
+        match op.state {
+            OpState::Queued(_) => {
+                // Worker never started — nothing to wait on. Engine
+                // was never moved out either, so workbook is intact.
+            }
+            OpState::Running(mut rx) => {
+                op.progress.cancel.store(true, Ordering::SeqCst);
+                if let Ok(res) = self.runtime.block_on(&mut rx) {
+                    // Apply just the engine-restore portion — drop
+                    // any cells/cache deltas the worker had already
+                    // computed. Cancel is "leaves no partial state."
+                    self.restore_engine_only(res);
+                }
+            }
+        }
+        self.mode = Mode::Ready;
+        true
+    }
+
+    /// Cancel-path companion to `apply_async_result`: put back the
+    /// engine if the worker returned one, but discard any cells or
+    /// success metadata so the workbook looks like nothing happened.
+    fn restore_engine_only(&mut self, res: AsyncResult) {
+        let engine = match res {
+            AsyncResult::FileRetrieveXlsx { .. } | AsyncResult::FileRetrieveCsv { .. } => None,
+            AsyncResult::FileSave { engine, .. }
+            | AsyncResult::FileImport { engine, .. }
+            | AsyncResult::Recalc { engine } => Some(engine),
+            AsyncResult::Cancelled { engine } | AsyncResult::Errored { engine, .. } => engine,
+        };
+        if let Some(e) = engine {
+            self.wb_mut().engine = e;
+        }
+    }
+
     pub fn run() -> anyhow::Result<()> {
         Self::run_with_file(None)
     }
@@ -2371,6 +3608,10 @@ impl App {
                 suspend_to_shell(terminal)?;
                 continue;
             }
+            // §4.7 — drain any queued long-running op. The render
+            // above already showed the WAIT frame for this iteration;
+            // the next render after the drain shows READY.
+            self.tick();
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => self.handle_key(k),
@@ -2632,6 +3873,16 @@ impl App {
     // ---------------- key handling ----------------
 
     pub fn handle_key(&mut self, k: KeyEvent) {
+        // §4.7 / SPEC §7: Ctrl-Break aborts an in-flight long op,
+        // dropping the queued work and returning to READY. This
+        // takes precedence over splash/help/menus so a runaway load
+        // is always escapable.
+        if matches!(k.code, KeyCode::Pause)
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+            && self.cancel_pending_async_op()
+        {
+            return;
+        }
         // Startup splash consumes the first keystroke and drops to
         // READY without dispatching — matches the 1-2-3 R3.4a behavior
         // where any key clears the welcome screen.
@@ -2947,7 +4198,13 @@ impl App {
                     return false;
                 }
             };
-            let frame = self.macro_state.as_mut().unwrap().frames.last_mut().unwrap();
+            let frame = self
+                .macro_state
+                .as_mut()
+                .unwrap()
+                .frames
+                .last_mut()
+                .unwrap();
             frame.remaining = actions.into_iter().collect();
             frame.pc = next_macro_pc(pc).unwrap_or(pc);
         }
@@ -2993,11 +4250,7 @@ impl App {
                     self.macro_state = None;
                     return false;
                 };
-                if let Some(top) = self
-                    .macro_state
-                    .as_mut()
-                    .and_then(|s| s.frames.last_mut())
-                {
+                if let Some(top) = self.macro_state.as_mut().and_then(|s| s.frames.last_mut()) {
                     top.pc = addr;
                     top.remaining.clear();
                 }
@@ -3014,11 +4267,7 @@ impl App {
             MacroAction::If(expr) => {
                 let truthy = self.eval_macro_condition(&expr);
                 if !truthy {
-                    if let Some(top) = self
-                        .macro_state
-                        .as_mut()
-                        .and_then(|s| s.frames.last_mut())
-                    {
+                    if let Some(top) = self.macro_state.as_mut().and_then(|s| s.frames.last_mut()) {
                         top.remaining.clear();
                     }
                 }
@@ -3277,11 +4526,7 @@ impl App {
         match k.code {
             KeyCode::Esc => self.finish_custom_menu(None),
             KeyCode::Enter => {
-                let idx = self
-                    .custom_menu
-                    .as_ref()
-                    .map(|m| m.highlight)
-                    .unwrap_or(0);
+                let idx = self.custom_menu.as_ref().map(|m| m.highlight).unwrap_or(0);
                 self.finish_custom_menu(Some(idx));
             }
             KeyCode::Left => {
@@ -3489,7 +4734,13 @@ impl App {
             KeyCode::F(2) if k.modifiers.contains(KeyModifiers::ALT) => {
                 self.step_mode = !self.step_mode;
             }
-            KeyCode::F(2) => self.begin_edit(),
+            KeyCode::F(2) => {
+                if self.is_cell_protected(self.wb().pointer) {
+                    self.request_beep();
+                } else {
+                    self.begin_edit();
+                }
+            }
             // Alt-F3 RUN: pop up the NAMES picker; Enter on a name
             // runs the macro stored at that range. Same overlay as
             // F3, just with a "run on commit" intent.
@@ -3516,7 +4767,14 @@ impl App {
             KeyCode::F(10) => self.enter_graph_view(),
             KeyCode::Char('/') => self.open_menu(),
             KeyCode::Char(':') => self.open_wysiwyg_menu(),
-            KeyCode::Char(c) => self.begin_entry(c),
+            KeyCode::Esc if self.input_range.is_some() => self.exit_input_mode(),
+            KeyCode::Char(c) => {
+                if self.is_cell_protected(self.wb().pointer) {
+                    self.request_beep();
+                } else {
+                    self.begin_entry(c);
+                }
+            }
             _ => {}
         }
     }
@@ -4064,6 +5322,77 @@ impl App {
                     self.wb_mut().sheet_states.insert(sheet, prev);
                 }
             }
+            JournalEntry::RangeNameReset { prev } => {
+                for (name, range) in prev {
+                    let _ = self.wb_mut().engine.define_name(&name, range);
+                    self.wb_mut()
+                        .named_ranges
+                        .insert(name.to_ascii_lowercase(), range);
+                }
+                self.wb_mut().engine.recalc();
+                self.refresh_formula_caches();
+            }
+            JournalEntry::RangeNameLabels {
+                created,
+                overwritten,
+            } => {
+                for name in created {
+                    let _ = self.wb_mut().engine.delete_name(&name);
+                    self.wb_mut().named_ranges.remove(&name);
+                }
+                for (name, range) in overwritten {
+                    let _ = self.wb_mut().engine.define_name(&name, range);
+                    self.wb_mut().named_ranges.insert(name, range);
+                }
+                self.wb_mut().engine.recalc();
+                self.refresh_formula_caches();
+            }
+            JournalEntry::RangeNameUndefine {
+                name,
+                range,
+                note,
+                cell_writes,
+            } => {
+                for (addr, prev) in cell_writes {
+                    self.restore_cell_contents(addr, prev);
+                }
+                let _ = self.wb_mut().engine.define_name(&name, range);
+                self.wb_mut()
+                    .named_ranges
+                    .insert(name.to_ascii_lowercase(), range);
+                if let Some(text) = note {
+                    self.wb_mut()
+                        .name_notes
+                        .insert(name.to_ascii_lowercase(), text);
+                }
+                self.wb_mut().engine.recalc();
+                self.refresh_formula_caches();
+            }
+            JournalEntry::RangeNameNote { name, prev } => {
+                let key = name.to_ascii_lowercase();
+                match prev {
+                    Some(text) => {
+                        self.wb_mut().name_notes.insert(key, text);
+                    }
+                    None => {
+                        self.wb_mut().name_notes.remove(&key);
+                    }
+                }
+            }
+            JournalEntry::RangeNameNoteReset { prev } => {
+                for (name, text) in prev {
+                    self.wb_mut().name_notes.insert(name, text);
+                }
+            }
+            JournalEntry::RangeProtection { entries } => {
+                for (addr, was_unprotected) in entries {
+                    if was_unprotected {
+                        self.wb_mut().cell_unprotected.insert(addr);
+                    } else {
+                        self.wb_mut().cell_unprotected.remove(&addr);
+                    }
+                }
+            }
             JournalEntry::Batch(entries) => {
                 // Apply in reverse order so the "outer" state restores
                 // after the "inner" details.
@@ -4076,11 +5405,20 @@ impl App {
 
     /// Explicit recalculation — invoked by F9 in READY mode. Safe to call
     /// repeatedly; no-op in terms of values but always clears the pending
-    /// flag.
+    /// flag. PLAN §4.7: workbooks above `RECALC_WAIT_CELL_THRESHOLD`
+    /// route through the async WAIT path so the UI doesn't freeze on
+    /// big sheets; smaller workbooks stay synchronous to avoid a
+    /// tokio round-trip on every F9.
     fn do_recalc(&mut self) {
-        self.wb_mut().engine.recalc();
-        self.refresh_formula_caches();
-        self.recalc_pending = false;
+        if self.wb().cells.len() > self.recalc_wait_cell_threshold {
+            let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+            let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+            self.queue_async_op("Recalculating", String::new(), QueuedOp::Recalc { engine });
+        } else {
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.recalc_pending = false;
+        }
     }
 
     // ---------------- MENU mode ----------------
@@ -4660,6 +5998,42 @@ impl App {
             Action::RangeNameDelete => {
                 self.start_name_prompt("Enter name to delete:", PromptNext::RangeNameDelete)
             }
+            Action::RangeNameReset => self.range_name_reset(),
+            Action::RangeNameLabelsRight => self.begin_point(PendingCommand::RangeNameLabels {
+                direction: LabelDirection::Right,
+            }),
+            Action::RangeNameLabelsDown => self.begin_point(PendingCommand::RangeNameLabels {
+                direction: LabelDirection::Down,
+            }),
+            Action::RangeNameLabelsLeft => self.begin_point(PendingCommand::RangeNameLabels {
+                direction: LabelDirection::Left,
+            }),
+            Action::RangeNameLabelsUp => self.begin_point(PendingCommand::RangeNameLabels {
+                direction: LabelDirection::Up,
+            }),
+            Action::RangeNameTable => self.begin_point(PendingCommand::RangeNameTable),
+            Action::RangeNameUndefine => {
+                self.start_name_prompt("Enter name to undefine:", PromptNext::RangeNameUndefine)
+            }
+            Action::RangeNameNoteCreate => {
+                self.start_name_prompt("Enter name to annotate:", PromptNext::RangeNameNoteCreate)
+            }
+            Action::RangeNameNoteDelete => self.start_name_prompt(
+                "Enter name whose note to delete:",
+                PromptNext::RangeNameNoteDelete,
+            ),
+            Action::RangeNameNoteReset => self.range_name_note_reset(),
+            Action::RangeNameNoteTable => self.begin_point(PendingCommand::RangeNameNoteTable),
+            Action::RangeProtect => {
+                self.begin_point(PendingCommand::RangeProtect { unprotected: false })
+            }
+            Action::RangeUnprotect => {
+                self.begin_point(PendingCommand::RangeProtect { unprotected: true })
+            }
+            Action::RangeInput => self.begin_point(PendingCommand::RangeInput),
+            Action::RangeValue => self.begin_point(PendingCommand::RangeValueFrom),
+            Action::RangeTrans => self.begin_point(PendingCommand::RangeTransFrom),
+            Action::RangeJustify => self.begin_point(PendingCommand::RangeJustify),
             Action::RangeErase => self.begin_point(PendingCommand::RangeErase),
             Action::Copy => self.begin_point(PendingCommand::CopyFrom),
             Action::Move => self.begin_point(PendingCommand::MoveFrom),
@@ -4804,6 +6178,36 @@ impl App {
             Action::RangeFormatDateShortIntl => self.begin_point(PendingCommand::RangeFormat {
                 format: Format {
                     kind: FormatKind::DateShortIntl,
+                    decimals: 0,
+                },
+            }),
+            Action::RangeFormatHidden => self.begin_point(PendingCommand::RangeFormat {
+                format: Format {
+                    kind: FormatKind::Hidden,
+                    decimals: 0,
+                },
+            }),
+            Action::RangeFormatTimeHmsAmPm => self.begin_point(PendingCommand::RangeFormat {
+                format: Format {
+                    kind: FormatKind::TimeHmsAmPm,
+                    decimals: 0,
+                },
+            }),
+            Action::RangeFormatTimeHmAmPm => self.begin_point(PendingCommand::RangeFormat {
+                format: Format {
+                    kind: FormatKind::TimeHmAmPm,
+                    decimals: 0,
+                },
+            }),
+            Action::RangeFormatTimeLongIntl => self.begin_point(PendingCommand::RangeFormat {
+                format: Format {
+                    kind: FormatKind::TimeLongIntl,
+                    decimals: 0,
+                },
+            }),
+            Action::RangeFormatTimeShortIntl => self.begin_point(PendingCommand::RangeFormat {
+                format: Format {
+                    kind: FormatKind::TimeShortIntl,
                     decimals: 0,
                 },
             }),
@@ -4986,6 +6390,103 @@ impl App {
             }
             Action::FileCombineSubtractNamed => {
                 self.start_file_combine_prompt(CombineKind::Subtract, false)
+            }
+            Action::DataFill => self.begin_point(PendingCommand::DataFillRange),
+            Action::DataSortDataRange => self.begin_point(PendingCommand::DataSortDataRange),
+            Action::DataSortPrimaryKey => {
+                self.pending_sort_key_slot = Some(SortKeySlot::Primary);
+                self.begin_point(PendingCommand::DataSortKey);
+            }
+            Action::DataSortSecondaryKey => {
+                self.pending_sort_key_slot = Some(SortKeySlot::Secondary);
+                self.begin_point(PendingCommand::DataSortKey);
+            }
+            Action::DataSortExtraKey => {
+                self.pending_sort_key_slot = Some(SortKeySlot::Extra);
+                self.begin_point(PendingCommand::DataSortKey);
+            }
+            Action::DataSortReset => {
+                self.data_sort = DataSortState::default();
+                self.pending_sort_key_slot = None;
+                self.enter_data_sort_menu();
+            }
+            Action::DataSortGo => self.execute_data_sort(),
+            Action::DataSortQuit => {
+                self.menu = None;
+                self.mode = Mode::Ready;
+            }
+            Action::DataSortAscending => self.bind_data_sort_dir(SortDir::Ascending),
+            Action::DataSortDescending => self.bind_data_sort_dir(SortDir::Descending),
+            Action::DataDistribution => self.begin_point(PendingCommand::DataDistributionValues),
+            Action::DataRegressionXRange => self.begin_point(PendingCommand::DataRegressionXRange),
+            Action::DataRegressionYRange => self.begin_point(PendingCommand::DataRegressionYRange),
+            Action::DataRegressionOutputRange => {
+                self.begin_point(PendingCommand::DataRegressionOutputRange)
+            }
+            Action::DataRegressionInterceptCompute => {
+                self.data_regression.intercept_zero = false;
+                self.enter_data_regression_menu();
+            }
+            Action::DataRegressionInterceptZero => {
+                self.data_regression.intercept_zero = true;
+                self.enter_data_regression_menu();
+            }
+            Action::DataRegressionReset => {
+                self.data_regression = DataRegressionState::default();
+                self.enter_data_regression_menu();
+            }
+            Action::DataRegressionGo => self.execute_data_regression(),
+            Action::DataRegressionQuit => {
+                self.menu = None;
+                self.mode = Mode::Ready;
+            }
+            Action::DataMatrixInvert => self.begin_point(PendingCommand::DataMatrixInvertInput),
+            Action::DataMatrixMultiply => self.begin_point(PendingCommand::DataMatrixMultiplyA),
+            Action::DataParseInputColumn => self.begin_point(PendingCommand::DataParseInputColumn),
+            Action::DataParseOutputRange => self.begin_point(PendingCommand::DataParseOutputRange),
+            Action::DataParseReset => {
+                self.data_parse = DataParseState::default();
+                self.enter_data_parse_menu();
+            }
+            Action::DataParseGo => self.execute_data_parse(),
+            Action::DataParseQuit => {
+                self.menu = None;
+                self.mode = Mode::Ready;
+            }
+            Action::DataTable1 => self.begin_point(PendingCommand::DataTable1Range),
+            Action::DataTable2 => self.begin_point(PendingCommand::DataTable2Range),
+            Action::DataTableReset => {
+                self.menu = None;
+                self.mode = Mode::Ready;
+            }
+            Action::DataParseFormatLineCreate => self.execute_parse_format_line_create(),
+            Action::DataParseFormatLineEdit => self.execute_parse_format_line_edit(),
+            Action::DataQueryInput => self.begin_point(PendingCommand::DataQueryInput),
+            Action::DataQueryCriteria => self.begin_point(PendingCommand::DataQueryCriteria),
+            Action::DataQueryOutput => self.begin_point(PendingCommand::DataQueryOutput),
+            Action::DataQueryFind => self.execute_data_query_find(),
+            Action::DataQueryExtract => self.execute_data_query_extract(false),
+            Action::DataQueryUnique => self.execute_data_query_extract(true),
+            Action::DataQueryDel => self.execute_data_query_del(),
+            Action::DataQueryReset => {
+                self.data_query = DataQueryState::default();
+                self.enter_data_query_menu();
+            }
+            Action::DataQueryQuit => {
+                self.menu = None;
+                self.mode = Mode::Ready;
+            }
+            Action::DataTable3Stub => {
+                self.set_error("Data Table 3 (3D table): not yet implemented in L123")
+            }
+            Action::DataTableLabeledStub => {
+                self.set_error("Data Table Labeled: not yet implemented in L123")
+            }
+            Action::DataQueryModifyStub => {
+                self.set_error("Data Query Modify: not yet implemented in L123")
+            }
+            Action::DataExternalStub => {
+                self.set_error("Data External: no external-database driver configured")
             }
         }
     }
@@ -5385,6 +6886,8 @@ impl App {
         self.wb_mut().col_widths.clear();
         self.wb_mut().default_col_width = 9;
         self.wb_mut().hidden_cols.clear();
+        self.wb_mut().named_ranges.clear();
+        self.wb_mut().name_notes.clear();
         self.entry = None;
         self.menu = None;
         self.prompt = None;
@@ -5845,6 +7348,8 @@ impl App {
             current_graph: GraphDef::default(),
             graphs: BTreeMap::new(),
             named_ranges: HashMap::new(),
+            name_notes: HashMap::new(),
+            cell_unprotected: HashSet::new(),
         };
         // If the active sheet is hidden / very-hidden, redirect to the
         // first visible sheet so the user lands somewhere they can
@@ -6074,83 +7579,6 @@ impl App {
         self.mode = Mode::Menu;
     }
 
-    /// Read `path` as plain text; each line becomes an apostrophe-prefixed
-    /// label down a single column starting at the pointer.  Counterpart to
-    /// [`Self::import_numbers_from`]: no field splitting, no number coercion,
-    /// embedded commas stay in the line. Empty lines are skipped (no
-    /// overwrite of the existing target cell).
-    fn import_text_from(&mut self, path: PathBuf) {
-        let body = match std::fs::read_to_string(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_error(format!("Cannot read {}: {e}", path.display()));
-                return;
-            }
-        };
-        let origin = self.wb_mut().pointer;
-        for (dr, line) in body.lines().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            let addr = Address::new(origin.sheet, origin.col, origin.row + dr as u32);
-            let engine_input = format!("'{line}");
-            let _ = self.wb_mut().engine.set_user_input(addr, &engine_input);
-            self.wb_mut().cells.insert(
-                addr,
-                CellContents::Label {
-                    prefix: LabelPrefix::Apostrophe,
-                    text: line.to_string(),
-                },
-            );
-        }
-        self.wb_mut().engine.recalc();
-        self.refresh_formula_caches();
-        self.mode = Mode::Ready;
-    }
-
-    /// Read `path` as CSV, paint values into cells starting at the
-    /// pointer. Numeric tokens become `Constant(Number)`; everything
-    /// else becomes `Label { Apostrophe, text }`. Empty fields are
-    /// skipped (no overwrite).
-    fn import_numbers_from(&mut self, path: PathBuf) {
-        let body = match std::fs::read_to_string(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_error(format!("Cannot read {}: {e}", path.display()));
-                return;
-            }
-        };
-        let rows = l123_io::csv::parse(&body);
-        let origin = self.wb_mut().pointer;
-        for (dr, row) in rows.iter().enumerate() {
-            for (dc, field) in row.iter().enumerate() {
-                if field.is_empty() {
-                    continue;
-                }
-                let addr =
-                    Address::new(origin.sheet, origin.col + dc as u16, origin.row + dr as u32);
-                let (contents, engine_input) = match field.parse::<f64>() {
-                    Ok(n) => (
-                        CellContents::Constant(Value::Number(n)),
-                        l123_core::format_number_general(n),
-                    ),
-                    Err(_) => (
-                        CellContents::Label {
-                            prefix: LabelPrefix::Apostrophe,
-                            text: field.clone(),
-                        },
-                        format!("'{field}"),
-                    ),
-                };
-                let _ = self.wb_mut().engine.set_user_input(addr, &engine_input);
-                self.wb_mut().cells.insert(addr, contents);
-            }
-        }
-        self.wb_mut().engine.recalc();
-        self.refresh_formula_caches();
-        self.mode = Mode::Ready;
-    }
-
     fn start_file_xtract_prompt(&mut self, kind: XtractKind) {
         self.menu = None;
         self.prompt = Some(PromptState {
@@ -6225,14 +7653,7 @@ impl App {
     /// Load an xlsx from disk, wiping the current in-memory workbook
     /// and repopulating the UI cache from the loaded engine model.
     fn load_workbook_from(&mut self, path: PathBuf) {
-        #[cfg(feature = "wk3")]
-        let is_wk3 = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.eq_ignore_ascii_case("wk3"))
-            .unwrap_or(false);
-        #[cfg(not(feature = "wk3"))]
-        let is_wk3 = false;
+        let is_wk3 = is_wk3_path(&path);
         let load_result = if is_wk3 {
             #[cfg(feature = "wk3")]
             {
@@ -6247,6 +7668,15 @@ impl App {
             self.set_error(format!("Cannot open {}: {e}", path.display()));
             return;
         }
+        self.repopulate_after_xlsx_load(path, is_wk3);
+    }
+
+    /// Post-engine-load workbook rebuild: wipe UI caches, pull cells
+    /// and styles back out of the engine, apply the formula-source
+    /// sidecar, and pin `active_path`. Shared by the sync CLI-startup
+    /// path (`load_workbook_from`) and the §4.7 async `/File Retrieve`
+    /// completion path (`apply_async_result::FileRetrieveXlsx`).
+    fn repopulate_after_xlsx_load(&mut self, path: PathBuf, is_wk3: bool) {
         // Wipe UI state; the loaded engine is the new source of truth.
         self.wb_mut().cells.clear();
         self.wb_mut().cell_formats.clear();
@@ -6264,6 +7694,8 @@ impl App {
         self.wb_mut().col_widths.clear();
         self.wb_mut().default_col_width = 9;
         self.wb_mut().hidden_cols.clear();
+        self.wb_mut().named_ranges.clear();
+        self.wb_mut().name_notes.clear();
         self.entry = None;
         self.wb_mut().pointer = Address::A1;
         self.wb_mut().viewport_col_offset = 0;
@@ -6285,8 +7717,7 @@ impl App {
         // from Excel, or saved before this feature landed).
         if let Ok(sources) = l123_io::formula_sources::read_from_xlsx(&path) {
             for (addr, src) in sources {
-                if let Some(CellContents::Formula { expr, .. }) =
-                    self.wb_mut().cells.get_mut(&addr)
+                if let Some(CellContents::Formula { expr, .. }) = self.wb_mut().cells.get_mut(&addr)
                 {
                     *expr = src;
                 }
@@ -6337,6 +7768,15 @@ impl App {
         for (sheet, t) in self.wb_mut().engine.used_tables() {
             self.wb_mut().tables.entry(sheet).or_default().push(t);
         }
+        // Pull workbook-global defined names back into the UI map so
+        // POINT typed-buffer name resolution and Alt-letter macro
+        // dispatch (including \0 autoexec) survive a save → reload.
+        // Keys are lowercased, matching the /RNC ingestion path.
+        for (name, range) in self.wb_mut().engine.used_defined_names() {
+            self.wb_mut()
+                .named_ranges
+                .insert(name.to_ascii_lowercase(), range);
+        }
         redirect_pointer_off_hidden(self.wb_mut());
         for sheet_idx in 0..sheet_count {
             let sid = SheetId(sheet_idx);
@@ -6361,14 +7801,14 @@ impl App {
         self.mode = Mode::Ready;
     }
 
-    /// Create parent dirs and write the workbook as xlsx. On success,
-    /// update `active_path` so the next /FS prefills this path.
-    fn save_workbook_to(&mut self, path: PathBuf) {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-        }
+    /// Push every UI-side override into the engine so the saved
+    /// xlsx carries column widths, text styles, formats, alignments,
+    /// fills, font styles, borders, comments, merges, frozen panes,
+    /// sheet states, tables, and tab colors. Mutates the engine in
+    /// place; safe to call repeatedly. Factored out of the legacy
+    /// sync `save_workbook_to` so the §4.7 async `/File Save` path
+    /// can run the same prep before handing the engine to a worker.
+    fn push_ui_overrides_into_engine(&mut self) {
         // Push UI-side column-width overrides into the engine so they
         // land in the xlsx. `col_widths` only contains non-default
         // entries; the engine default is preserved for every other
@@ -6506,26 +7946,91 @@ impl App {
         for (sid, color) in sheet_colors {
             let _ = self.wb_mut().engine.set_sheet_color(sid, Some(color));
         }
+    }
+
+    /// Synchronous `/File Save` — used by xlsx round-trip unit tests
+    /// where stepping through tokio adds noise. Production /FS goes
+    /// through `queue_file_save` so the UI doesn't freeze.
+    #[cfg(test)]
+    fn save_workbook_to(&mut self, path: PathBuf) {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        self.push_ui_overrides_into_engine();
         if self.wb_mut().engine.save_xlsx(&path).is_ok() {
-            // Embed the user-typed Lotus source per formula cell as
-            // a sidecar inside the xlsx zip so save → reload
-            // preserves shapes the cosmetic reverse translator
-            // can't recover (arg-fix wrappers, emulated functions
-            // like @CTERM, 3D-range expansions). A failure here is
-            // best-effort — the xlsx itself is already saved.
-            let sources: HashMap<Address, String> = self
-                .wb()
-                .cells
-                .iter()
-                .filter_map(|(addr, c)| match c {
-                    CellContents::Formula { expr, .. } => Some((*addr, expr.clone())),
-                    _ => None,
-                })
-                .collect();
+            let sources = self.formula_sources_snapshot();
             let _ = l123_io::formula_sources::write_to_xlsx(&path, &sources);
             self.wb_mut().active_path = Some(path);
             self.wb_mut().dirty = false;
         }
+    }
+
+    /// Snapshot of every formula cell's user-typed Lotus source, used
+    /// by the formula-source sidecar embedded in the xlsx zip so
+    /// save → reload preserves shapes the cosmetic reverse
+    /// translator can't recover (arg-fix wrappers, emulated
+    /// functions like @CTERM, 3D-range expansions).
+    fn formula_sources_snapshot(&self) -> HashMap<Address, String> {
+        self.wb()
+            .cells
+            .iter()
+            .filter_map(|(addr, c)| match c {
+                CellContents::Formula { expr, .. } => Some((*addr, expr.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Queue an async `/File Save`. Pushes UI overrides into the
+    /// engine on the main thread (fast O(N-overridden-cells)), then
+    /// hands ownership of the engine to a worker that does the
+    /// actual xlsx write. The worker also writes the formula-source
+    /// sidecar on success. Engine is restored to the workbook when
+    /// the worker returns (success, error, or cancel).
+    fn queue_file_save(&mut self, path: PathBuf) {
+        self.push_ui_overrides_into_engine();
+        let formula_sources = self.formula_sources_snapshot();
+        let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+        let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+        let name = display_basename(&path);
+        self.queue_async_op(
+            "Saving",
+            name,
+            QueuedOp::FileSave {
+                engine,
+                path,
+                formula_sources,
+            },
+        );
+    }
+
+    /// Queue an async `/File Import {Numbers,Text}`. Engine is
+    /// taken out of the workbook and travels with the op so the
+    /// per-row `set_user_input` calls run off the UI thread.
+    /// `numeric_split = true` corresponds to `/FIN` (CSV split with
+    /// number coercion); `false` to `/FIT` (one label per line, no
+    /// splitting).
+    fn queue_file_import(&mut self, path: PathBuf, numeric_split: bool) {
+        let origin = self.wb().pointer;
+        let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+        let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+        let name = display_basename(&path);
+        let queued = if numeric_split {
+            QueuedOp::FileImportNumbers {
+                engine,
+                path,
+                origin,
+            }
+        } else {
+            QueuedOp::FileImportText {
+                engine,
+                path,
+                origin,
+            }
+        };
+        self.queue_async_op("Importing", name, queued);
     }
 
     /// Handle a keystroke while the Cancel/Replace/Backup confirm is up.
@@ -6628,16 +8133,17 @@ impl App {
                 self.mode = Mode::Ready;
             }
             1 => {
-                // Replace — overwrite.
-                self.save_workbook_to(sc.path);
-                self.mode = Mode::Ready;
+                // Replace — overwrite. IronCalc's save_xlsx refuses
+                // to clobber an existing file, so blow it away here
+                // (the user explicitly chose Replace).
+                let _ = std::fs::remove_file(&sc.path);
+                self.queue_file_save(sc.path);
             }
             2 => {
                 // Backup — rename existing to .BAK, then save.
                 let backup = sc.path.with_extension("BAK");
                 let _ = std::fs::rename(&sc.path, &backup);
-                self.save_workbook_to(sc.path);
-                self.mode = Mode::Ready;
+                self.queue_file_save(sc.path);
             }
             _ => {
                 self.mode = Mode::Ready;
@@ -7188,6 +8694,49 @@ impl App {
                 }
                 self.mode = Mode::Ready;
             }
+            PendingCommand::RangeNameLabels { direction } => {
+                for r in ranges {
+                    self.execute_range_name_labels(*r, direction);
+                }
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeNameTable => {
+                self.execute_range_name_table(first.start);
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeNameNoteTable => {
+                self.execute_range_name_note_table(first.start);
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeProtect { unprotected } => {
+                for r in ranges {
+                    self.execute_range_protection(*r, unprotected);
+                }
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeInput => {
+                self.enter_input_mode(first);
+            }
+            PendingCommand::RangeValueFrom => {
+                self.transition_point(PendingCommand::RangeValueTo { src: first });
+            }
+            PendingCommand::RangeValueTo { src } => {
+                self.execute_range_value(src, first.start);
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeTransFrom => {
+                self.transition_point(PendingCommand::RangeTransTo { src: first });
+            }
+            PendingCommand::RangeTransTo { src } => {
+                self.execute_range_trans(src, first.start);
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::RangeJustify => {
+                for r in ranges {
+                    self.execute_range_justify(*r);
+                }
+                self.mode = Mode::Ready;
+            }
             PendingCommand::FileXtractRange { kind } => {
                 if let Some(path) = self.pending_xtract_path.take() {
                     self.execute_file_xtract(first, kind, path);
@@ -7247,6 +8796,98 @@ impl App {
             PendingCommand::WorksheetLearnRange => {
                 self.learn_range = Some(first.normalized());
                 self.mode = Mode::Ready;
+            }
+            PendingCommand::DataFillRange => {
+                self.start_data_fill_start_prompt(first.normalized());
+            }
+            PendingCommand::DataSortDataRange => {
+                self.data_sort.data_range = Some(first.normalized());
+                self.enter_data_sort_menu();
+            }
+            PendingCommand::DataSortKey => {
+                self.enter_data_sort_dir_menu(first.start.col);
+            }
+            PendingCommand::DataDistributionValues => {
+                let values = first.normalized();
+                self.transition_point(PendingCommand::DataDistributionBins { values });
+            }
+            PendingCommand::DataDistributionBins { values } => {
+                self.execute_data_distribution(values, first.normalized());
+            }
+            PendingCommand::DataRegressionXRange => {
+                self.data_regression.x_range = Some(first.normalized());
+                self.enter_data_regression_menu();
+            }
+            PendingCommand::DataRegressionYRange => {
+                self.data_regression.y_range = Some(first.normalized());
+                self.enter_data_regression_menu();
+            }
+            PendingCommand::DataRegressionOutputRange => {
+                // Only the cursor position matters for the output
+                // anchor; ignore any extent the highlight picked up
+                // from the prior commit's anchor.
+                self.data_regression.output_anchor = Some(self.wb().pointer);
+                self.enter_data_regression_menu();
+            }
+            PendingCommand::DataMatrixInvertInput => {
+                let source = first.normalized();
+                self.begin_point(PendingCommand::DataMatrixInvertOutput { source });
+            }
+            PendingCommand::DataMatrixInvertOutput { source } => {
+                let anchor = self.wb().pointer;
+                self.execute_matrix_invert(source, anchor);
+            }
+            PendingCommand::DataMatrixMultiplyA => {
+                let a = first.normalized();
+                self.begin_point(PendingCommand::DataMatrixMultiplyB { a });
+            }
+            PendingCommand::DataMatrixMultiplyB { a } => {
+                let b = first.normalized();
+                self.begin_point(PendingCommand::DataMatrixMultiplyOutput { a, b });
+            }
+            PendingCommand::DataMatrixMultiplyOutput { a, b } => {
+                let anchor = self.wb().pointer;
+                self.execute_matrix_multiply(a, b, anchor);
+            }
+            PendingCommand::DataParseInputColumn => {
+                self.data_parse.input_range = Some(first.normalized());
+                self.enter_data_parse_menu();
+            }
+            PendingCommand::DataParseOutputRange => {
+                self.data_parse.output_anchor = Some(self.wb().pointer);
+                self.enter_data_parse_menu();
+            }
+            PendingCommand::DataTable1Range => {
+                let range = first.normalized();
+                self.begin_point(PendingCommand::DataTable1Input1 { range });
+            }
+            PendingCommand::DataTable1Input1 { range } => {
+                let input1 = self.wb().pointer;
+                self.execute_data_table_1(range, input1);
+            }
+            PendingCommand::DataTable2Range => {
+                let range = first.normalized();
+                self.begin_point(PendingCommand::DataTable2Input1 { range });
+            }
+            PendingCommand::DataTable2Input1 { range } => {
+                let input1 = self.wb().pointer;
+                self.begin_point(PendingCommand::DataTable2Input2 { range, input1 });
+            }
+            PendingCommand::DataTable2Input2 { range, input1 } => {
+                let input2 = self.wb().pointer;
+                self.execute_data_table_2(range, input1, input2);
+            }
+            PendingCommand::DataQueryInput => {
+                self.data_query.input = Some(first.normalized());
+                self.enter_data_query_menu();
+            }
+            PendingCommand::DataQueryCriteria => {
+                self.data_query.criteria = Some(first.normalized());
+                self.enter_data_query_menu();
+            }
+            PendingCommand::DataQueryOutput => {
+                self.data_query.output = Some(first.normalized());
+                self.enter_data_query_menu();
             }
         }
     }
@@ -7390,6 +9031,1435 @@ impl App {
     }
 
     // ---------------- command-argument prompt ----------------
+
+    fn enter_data_sort_menu(&mut self) {
+        self.menu = Some(MenuState::rooted_at(menu::DATA_SORT_MENU));
+        self.mode = Mode::Menu;
+    }
+
+    fn enter_data_sort_dir_menu(&mut self, key_col: u16) {
+        self.pending_sort_key_col = Some(key_col);
+        self.menu = Some(MenuState::rooted_at(menu::DATA_SORT_DIR_MENU));
+        self.mode = Mode::Menu;
+    }
+
+    fn bind_data_sort_dir(&mut self, dir: SortDir) {
+        let slot = self.pending_sort_key_slot.take();
+        let col = self.pending_sort_key_col.take();
+        if let (Some(slot), Some(col)) = (slot, col) {
+            match slot {
+                SortKeySlot::Primary => self.data_sort.primary = Some((col, dir)),
+                SortKeySlot::Secondary => self.data_sort.secondary = Some((col, dir)),
+                SortKeySlot::Extra => self.data_sort.extra = Some((col, dir)),
+            }
+        }
+        self.enter_data_sort_menu();
+    }
+
+    /// Sort the configured data range in place by primary (and
+    /// optional secondary) key column. Empty/missing data range or
+    /// missing primary key is a silent no-op back to READY — matches
+    /// 1-2-3's behavior of refusing rather than erroring.
+    fn execute_data_sort(&mut self) {
+        let Some(range) = self.data_sort.data_range else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some((primary_col, primary_dir)) = self.data_sort.primary else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let secondary = self.data_sort.secondary;
+        let extra = self.data_sort.extra;
+        let r = range.normalized();
+        let sheet = r.start.sheet;
+        let row_lo = r.start.row;
+        let row_hi = r.end.row;
+        let col_lo = r.start.col;
+        let col_hi = r.end.col;
+
+        // Capture each row as a Vec of (col-offset, contents/format/style).
+        type RowSnapshot = Vec<(u16, Option<CellContents>, Option<Format>, Option<TextStyle>)>;
+        let mut rows: Vec<RowSnapshot> = Vec::with_capacity((row_hi - row_lo + 1) as usize);
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for row in row_lo..=row_hi {
+            let mut snap: RowSnapshot = Vec::with_capacity((col_hi - col_lo + 1) as usize);
+            for col in col_lo..=col_hi {
+                let addr = Address::new(sheet, col, row);
+                let c = self.wb().cells.get(&addr).cloned();
+                let f = self.wb().cell_formats.get(&addr).copied();
+                let s = self.wb().cell_text_styles.get(&addr).copied();
+                if let Some(ref cc) = c {
+                    prev_cells.push((addr, cc.clone()));
+                }
+                if let Some(ff) = f {
+                    prev_formats.push((addr, ff));
+                }
+                if let Some(ss) = s {
+                    prev_text_styles.push((addr, ss));
+                }
+                snap.push((col - col_lo, c, f, s));
+            }
+            rows.push(snap);
+        }
+
+        let key_for = |snap: &RowSnapshot, key_col: u16| -> Option<CellContents> {
+            let off = key_col.saturating_sub(col_lo);
+            snap.iter()
+                .find(|(o, _, _, _)| *o == off)
+                .and_then(|(_, c, _, _)| c.clone())
+        };
+
+        rows.sort_by(|a, b| {
+            let pa = key_for(a, primary_col);
+            let pb = key_for(b, primary_col);
+            let mut ord = compare_cell_contents(pa.as_ref(), pb.as_ref());
+            if primary_dir == SortDir::Descending {
+                ord = ord.reverse();
+            }
+            if ord == std::cmp::Ordering::Equal {
+                if let Some((sec_col, sec_dir)) = secondary {
+                    let sa = key_for(a, sec_col);
+                    let sb = key_for(b, sec_col);
+                    let mut sord = compare_cell_contents(sa.as_ref(), sb.as_ref());
+                    if sec_dir == SortDir::Descending {
+                        sord = sord.reverse();
+                    }
+                    ord = sord;
+                }
+            }
+            if ord == std::cmp::Ordering::Equal {
+                if let Some((ex_col, ex_dir)) = extra {
+                    let ea = key_for(a, ex_col);
+                    let eb = key_for(b, ex_col);
+                    let mut eord = compare_cell_contents(ea.as_ref(), eb.as_ref());
+                    if ex_dir == SortDir::Descending {
+                        eord = eord.reverse();
+                    }
+                    ord = eord;
+                }
+            }
+            ord
+        });
+
+        // Write the sorted rows back into the same rectangle.
+        for (i, snap) in rows.iter().enumerate() {
+            let row = row_lo + i as u32;
+            for col in col_lo..=col_hi {
+                let addr = Address::new(sheet, col, row);
+                let off = col - col_lo;
+                let entry = snap.iter().find(|(o, _, _, _)| *o == off);
+                self.wb_mut().cells.remove(&addr);
+                self.wb_mut().cell_formats.remove(&addr);
+                self.wb_mut().cell_text_styles.remove(&addr);
+                let _ = self.wb_mut().engine.clear_cell(addr);
+                if let Some((_, contents, format, style)) = entry {
+                    if let Some(c) = contents {
+                        self.wb_mut().cells.insert(addr, c.clone());
+                        self.push_to_engine_at(addr, c);
+                    }
+                    if let Some(f) = format {
+                        self.wb_mut().cell_formats.insert(addr, *f);
+                    }
+                    if let Some(s) = style {
+                        self.wb_mut().cell_text_styles.insert(addr, *s);
+                    }
+                }
+            }
+        }
+
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    /// `/Data Matrix Invert` — Gauss-Jordan inverse of a square
+    /// matrix read from `source`, written column-major into the
+    /// rectangle anchored at `anchor`. Surfaces a status-line
+    /// error on non-square or singular input.
+    #[allow(clippy::needless_range_loop)]
+    fn execute_matrix_invert(&mut self, source: Range, anchor: Address) {
+        let s = source.normalized();
+        let n_rows = (s.end.row - s.start.row + 1) as usize;
+        let n_cols = (s.end.col - s.start.col + 1) as usize;
+        if n_rows != n_cols {
+            self.set_error("Matrix Invert: source range is not square");
+            return;
+        }
+        let n = n_rows;
+        let mut mat: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
+        for r in 0..n {
+            for c in 0..n {
+                let addr = Address::new(
+                    s.start.sheet,
+                    s.start.col + c as u16,
+                    s.start.row + r as u32,
+                );
+                mat[r][c] = self.numeric_cell_value(addr).unwrap_or(0.0);
+            }
+        }
+        let inv = match gauss_jordan_invert(mat) {
+            Some(m) => m,
+            None => {
+                self.set_error("Matrix Invert: matrix is singular");
+                return;
+            }
+        };
+        self.write_matrix_at(anchor, &inv);
+        self.mode = Mode::Ready;
+    }
+
+    /// `/Data Matrix Multiply` — write A*B into the rectangle
+    /// anchored at `anchor`. Refuses with a status-line error when
+    /// `cols(A) != rows(B)`.
+    #[allow(clippy::needless_range_loop)]
+    fn execute_matrix_multiply(&mut self, a_range: Range, b_range: Range, anchor: Address) {
+        let ar = a_range.normalized();
+        let br = b_range.normalized();
+        let a_rows = (ar.end.row - ar.start.row + 1) as usize;
+        let a_cols = (ar.end.col - ar.start.col + 1) as usize;
+        let b_rows = (br.end.row - br.start.row + 1) as usize;
+        let b_cols = (br.end.col - br.start.col + 1) as usize;
+        if a_cols != b_rows {
+            self.set_error("Matrix Multiply: cols(A) must equal rows(B)");
+            return;
+        }
+        let mut a: Vec<Vec<f64>> = vec![vec![0.0; a_cols]; a_rows];
+        for r in 0..a_rows {
+            for c in 0..a_cols {
+                let addr = Address::new(
+                    ar.start.sheet,
+                    ar.start.col + c as u16,
+                    ar.start.row + r as u32,
+                );
+                a[r][c] = self.numeric_cell_value(addr).unwrap_or(0.0);
+            }
+        }
+        let mut b: Vec<Vec<f64>> = vec![vec![0.0; b_cols]; b_rows];
+        for r in 0..b_rows {
+            for c in 0..b_cols {
+                let addr = Address::new(
+                    br.start.sheet,
+                    br.start.col + c as u16,
+                    br.start.row + r as u32,
+                );
+                b[r][c] = self.numeric_cell_value(addr).unwrap_or(0.0);
+            }
+        }
+        let mut prod: Vec<Vec<f64>> = vec![vec![0.0; b_cols]; a_rows];
+        for i in 0..a_rows {
+            for j in 0..b_cols {
+                let mut acc = 0.0_f64;
+                for k in 0..a_cols {
+                    acc += a[i][k] * b[k][j];
+                }
+                prod[i][j] = acc;
+            }
+        }
+        self.write_matrix_at(anchor, &prod);
+        self.mode = Mode::Ready;
+    }
+
+    /// Write a row-major matrix into the grid anchored at `anchor`.
+    /// Captures previous cell contents so Alt-F4 reverts. Recalcs +
+    /// marks the workbook dirty. Values are rounded to 12 significant
+    /// decimal digits before storage to suppress floating-point noise
+    /// from the linear-algebra kernels — `0.6000000000000001` becomes
+    /// the exact `0.6` users expect to see.
+    fn write_matrix_at(&mut self, anchor: Address, mat: &[Vec<f64>]) {
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for (i, row) in mat.iter().enumerate() {
+            for (j, value) in row.iter().enumerate() {
+                let value = round_to_significant(*value, 12);
+                let addr = Address::new(anchor.sheet, anchor.col + j as u16, anchor.row + i as u32);
+                if let Some(c) = self.wb().cells.get(&addr) {
+                    prev_cells.push((addr, c.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&addr) {
+                    prev_formats.push((addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&addr) {
+                    prev_text_styles.push((addr, *s));
+                }
+                let s = l123_core::format_number_general(value);
+                let _ = self.wb_mut().engine.set_user_input(addr, &s);
+                self.wb_mut()
+                    .cells
+                    .insert(addr, CellContents::Constant(Value::Number(value)));
+            }
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+    }
+
+    /// `/Data Table 1` — for each variable value in the left column
+    /// of `range` (rows below the corner), substitute it into
+    /// `input1`, recalc, and copy the resulting top-row formula
+    /// values into the body cells. The original contents of `input1`
+    /// are restored when the loop completes. Refuses degenerate
+    /// (single-row or single-column) table ranges with no body
+    /// cells.
+    /// `/Data Table 2` — for each (var-1 in left column, var-2 in
+    /// top row), substitute into Input cells 1 and 2, recalc, and
+    /// write the value of the corner-cell formula into the body.
+    /// Both Input cells are restored when the loop completes.
+    fn execute_data_table_2(&mut self, range: Range, input1: Address, input2: Address) {
+        let r = range.normalized();
+        if r.start.row == r.end.row || r.start.col == r.end.col {
+            self.set_error("Data Table 2: range must include at least one body cell");
+            return;
+        }
+        let sheet = r.start.sheet;
+        let formula_addr = Address::new(sheet, r.start.col, r.start.row);
+        let original_input1 = self.wb().cells.get(&input1).cloned();
+        let original_input2 = self.wb().cells.get(&input2).cloned();
+
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for body_row in (r.start.row + 1)..=r.end.row {
+            let var1_addr = Address::new(sheet, r.start.col, body_row);
+            let Some(var1) = self.numeric_cell_value(var1_addr) else {
+                continue;
+            };
+            let s1 = l123_core::format_number_general(var1);
+            let _ = self.wb_mut().engine.set_user_input(input1, &s1);
+            self.wb_mut()
+                .cells
+                .insert(input1, CellContents::Constant(Value::Number(var1)));
+
+            for body_col in (r.start.col + 1)..=r.end.col {
+                let var2_addr = Address::new(sheet, body_col, r.start.row);
+                let Some(var2) = self.numeric_cell_value(var2_addr) else {
+                    continue;
+                };
+                let s2 = l123_core::format_number_general(var2);
+                let _ = self.wb_mut().engine.set_user_input(input2, &s2);
+                self.wb_mut()
+                    .cells
+                    .insert(input2, CellContents::Constant(Value::Number(var2)));
+                self.wb_mut().engine.recalc();
+                self.refresh_formula_caches();
+
+                let value = self
+                    .wb()
+                    .cells
+                    .get(&formula_addr)
+                    .map(|c| c.value())
+                    .unwrap_or(Value::Empty);
+                let body_addr = Address::new(sheet, body_col, body_row);
+                if let Some(c) = self.wb().cells.get(&body_addr) {
+                    prev_cells.push((body_addr, c.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&body_addr) {
+                    prev_formats.push((body_addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&body_addr) {
+                    prev_text_styles.push((body_addr, *s));
+                }
+                if let Value::Number(n) = value {
+                    let s = l123_core::format_number_general(n);
+                    let _ = self.wb_mut().engine.set_user_input(body_addr, &s);
+                    self.wb_mut()
+                        .cells
+                        .insert(body_addr, CellContents::Constant(Value::Number(n)));
+                } else {
+                    self.wb_mut().cells.remove(&body_addr);
+                    let _ = self.wb_mut().engine.clear_cell(body_addr);
+                }
+            }
+        }
+
+        // Restore both Input cells to their pre-call contents.
+        if let Some(orig) = &original_input1 {
+            prev_cells.push((input1, orig.clone()));
+            self.wb_mut().cells.insert(input1, orig.clone());
+            self.push_to_engine_at(input1, orig);
+        } else {
+            self.wb_mut().cells.remove(&input1);
+            let _ = self.wb_mut().engine.clear_cell(input1);
+        }
+        if let Some(orig) = &original_input2 {
+            prev_cells.push((input2, orig.clone()));
+            self.wb_mut().cells.insert(input2, orig.clone());
+            self.push_to_engine_at(input2, orig);
+        } else {
+            self.wb_mut().cells.remove(&input2);
+            let _ = self.wb_mut().engine.clear_cell(input2);
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    fn execute_data_table_1(&mut self, range: Range, input1: Address) {
+        let r = range.normalized();
+        if r.start.row == r.end.row || r.start.col == r.end.col {
+            self.set_error("Data Table 1: range must include at least one body cell");
+            return;
+        }
+        let sheet = r.start.sheet;
+        let formula_row = r.start.row;
+        let var_col = r.start.col;
+        let original_input1 = self.wb().cells.get(&input1).cloned();
+
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for body_row in (formula_row + 1)..=r.end.row {
+            let var_addr = Address::new(sheet, var_col, body_row);
+            let Some(var_value) = self.numeric_cell_value(var_addr) else {
+                continue;
+            };
+            let s = l123_core::format_number_general(var_value);
+            let _ = self.wb_mut().engine.set_user_input(input1, &s);
+            self.wb_mut()
+                .cells
+                .insert(input1, CellContents::Constant(Value::Number(var_value)));
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+
+            for body_col in (var_col + 1)..=r.end.col {
+                let formula_addr = Address::new(sheet, body_col, formula_row);
+                let value = match self.wb().cells.get(&formula_addr) {
+                    Some(c) => c.value(),
+                    None => Value::Empty,
+                };
+                let body_addr = Address::new(sheet, body_col, body_row);
+                if let Some(c) = self.wb().cells.get(&body_addr) {
+                    prev_cells.push((body_addr, c.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&body_addr) {
+                    prev_formats.push((body_addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&body_addr) {
+                    prev_text_styles.push((body_addr, *s));
+                }
+                if let Value::Number(n) = value {
+                    let s = l123_core::format_number_general(n);
+                    let _ = self.wb_mut().engine.set_user_input(body_addr, &s);
+                    self.wb_mut()
+                        .cells
+                        .insert(body_addr, CellContents::Constant(Value::Number(n)));
+                } else {
+                    self.wb_mut().cells.remove(&body_addr);
+                    let _ = self.wb_mut().engine.clear_cell(body_addr);
+                }
+            }
+        }
+
+        // Capture the input cell's prior state for the journal, then
+        // restore it (so the workbook visually returns to its
+        // pre-/DT 1 state apart from the new body cells).
+        if let Some(orig) = &original_input1 {
+            prev_cells.push((input1, orig.clone()));
+            self.wb_mut().cells.insert(input1, orig.clone());
+            self.push_to_engine_at(input1, orig);
+        } else {
+            self.wb_mut().cells.remove(&input1);
+            let _ = self.wb_mut().engine.clear_cell(input1);
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    fn enter_data_parse_menu(&mut self) {
+        self.menu = Some(MenuState::rooted_at(menu::DATA_PARSE_MENU));
+        self.mode = Mode::Menu;
+    }
+
+    fn enter_data_query_menu(&mut self) {
+        self.menu = Some(MenuState::rooted_at(menu::DATA_QUERY_MENU));
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data Query Find` — jump the pointer to the first record
+    /// in the input range that matches the criteria. Silent
+    /// no-op when input or criteria is unset, or when no record
+    /// matches.
+    fn execute_data_query_find(&mut self) {
+        let Some((input, criteria)) = self.data_query.input.zip(self.data_query.criteria) else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let input = input.normalized();
+        let criteria = criteria.normalized();
+        let n_records = input.end.row.saturating_sub(input.start.row);
+        for r in 0..n_records {
+            if self.query_record_matches(input, criteria, r) {
+                let row = input.start.row + 1 + r;
+                self.wb_mut().pointer = Address::new(input.start.sheet, input.start.col, row);
+                self.scroll_into_view();
+                break;
+            }
+        }
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    /// `/Data Query Extract` (`unique=false`) and `/Data Query
+    /// Unique` (`unique=true`). Walks the input range, collects
+    /// matching records, and writes them into the output range
+    /// below its header. When the output's row 1 has labels, only
+    /// fields whose names match are copied (in output-header
+    /// order); otherwise every input field is copied.
+    fn execute_data_query_extract(&mut self, unique: bool) {
+        let Some(input) = self.data_query.input else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(criteria) = self.data_query.criteria else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(output) = self.data_query.output else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let input = input.normalized();
+        let criteria = criteria.normalized();
+        let output = output.normalized();
+        let in_field_count = (input.end.col - input.start.col + 1) as usize;
+        let in_field_names: Vec<String> = (0..in_field_count)
+            .map(|i| {
+                let addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + i as u16,
+                    input.start.row,
+                );
+                self.cell_label_lower(addr).unwrap_or_default()
+            })
+            .collect();
+        let out_field_count = (output.end.col - output.start.col + 1) as usize;
+        let out_field_names: Vec<String> = (0..out_field_count)
+            .map(|i| {
+                let addr = Address::new(
+                    output.start.sheet,
+                    output.start.col + i as u16,
+                    output.start.row,
+                );
+                self.cell_label_lower(addr).unwrap_or_default()
+            })
+            .collect();
+        // For each output column, find the matching input column
+        // by header label; or use the same column index when the
+        // output header is empty.
+        let header_present = out_field_names.iter().any(|s| !s.is_empty());
+        let column_map: Vec<Option<usize>> = if header_present {
+            out_field_names
+                .iter()
+                .map(|name| {
+                    if name.is_empty() {
+                        None
+                    } else {
+                        in_field_names.iter().position(|n| n == name)
+                    }
+                })
+                .collect()
+        } else {
+            (0..out_field_count.min(in_field_count))
+                .map(Some)
+                .chain(std::iter::repeat_n(
+                    None,
+                    out_field_count.saturating_sub(in_field_count),
+                ))
+                .collect()
+        };
+
+        let n_records = input.end.row.saturating_sub(input.start.row);
+        let mut emitted: Vec<Vec<Option<CellContents>>> = Vec::new();
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+
+        let max_out_rows = if output.end.row > output.start.row {
+            (output.end.row - output.start.row) as usize
+        } else {
+            0
+        };
+
+        let mut out_row_idx: usize = 0;
+        for r in 0..n_records {
+            if !self.query_record_matches(input, criteria, r) {
+                continue;
+            }
+            let in_row = input.start.row + 1 + r;
+            let row_values: Vec<Option<CellContents>> = column_map
+                .iter()
+                .map(|maybe_in_col| {
+                    maybe_in_col.and_then(|in_col| {
+                        let addr = Address::new(
+                            input.start.sheet,
+                            input.start.col + in_col as u16,
+                            in_row,
+                        );
+                        self.wb().cells.get(&addr).cloned()
+                    })
+                })
+                .collect();
+            if unique && emitted.iter().any(|r| r == &row_values) {
+                continue;
+            }
+            if max_out_rows > 0 && out_row_idx >= max_out_rows {
+                break;
+            }
+            emitted.push(row_values.clone());
+            for (j, contents) in row_values.iter().enumerate() {
+                let out_addr = Address::new(
+                    output.start.sheet,
+                    output.start.col + j as u16,
+                    output.start.row + 1 + out_row_idx as u32,
+                );
+                if let Some(c) = self.wb().cells.get(&out_addr) {
+                    prev_cells.push((out_addr, c.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&out_addr) {
+                    prev_formats.push((out_addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&out_addr) {
+                    prev_text_styles.push((out_addr, *s));
+                }
+                if let Some(c) = contents {
+                    self.wb_mut().cells.insert(out_addr, c.clone());
+                    self.push_to_engine_at(out_addr, c);
+                } else {
+                    self.wb_mut().cells.remove(&out_addr);
+                    let _ = self.wb_mut().engine.clear_cell(out_addr);
+                }
+            }
+            out_row_idx += 1;
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    /// `/Data Query Del` — drop matching records and shift the
+    /// surviving records up so the input range stays compact below
+    /// its header. Trailing rows in the original input range are
+    /// cleared.
+    fn execute_data_query_del(&mut self) {
+        let Some(input) = self.data_query.input else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(criteria) = self.data_query.criteria else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let input = input.normalized();
+        let criteria = criteria.normalized();
+        let n_records = input.end.row.saturating_sub(input.start.row);
+        let n_cols = (input.end.col - input.start.col + 1) as usize;
+        let mut survivors: Vec<Vec<Option<CellContents>>> = Vec::new();
+        for r in 0..n_records {
+            if self.query_record_matches(input, criteria, r) {
+                continue;
+            }
+            let in_row = input.start.row + 1 + r;
+            let row_values: Vec<Option<CellContents>> = (0..n_cols)
+                .map(|c| {
+                    let addr = Address::new(input.start.sheet, input.start.col + c as u16, in_row);
+                    self.wb().cells.get(&addr).cloned()
+                })
+                .collect();
+            survivors.push(row_values);
+        }
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for r in 0..n_records {
+            for c in 0..n_cols {
+                let addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + c as u16,
+                    input.start.row + 1 + r,
+                );
+                if let Some(cc) = self.wb().cells.get(&addr) {
+                    prev_cells.push((addr, cc.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&addr) {
+                    prev_formats.push((addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&addr) {
+                    prev_text_styles.push((addr, *s));
+                }
+            }
+        }
+        for (i, row) in survivors.iter().enumerate() {
+            for (c, contents) in row.iter().enumerate() {
+                let addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + c as u16,
+                    input.start.row + 1 + i as u32,
+                );
+                if let Some(cc) = contents {
+                    self.wb_mut().cells.insert(addr, cc.clone());
+                    self.push_to_engine_at(addr, cc);
+                } else {
+                    self.wb_mut().cells.remove(&addr);
+                    let _ = self.wb_mut().engine.clear_cell(addr);
+                }
+            }
+        }
+        for r in survivors.len()..(n_records as usize) {
+            for c in 0..n_cols {
+                let addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + c as u16,
+                    input.start.row + 1 + r as u32,
+                );
+                self.wb_mut().cells.remove(&addr);
+                let _ = self.wb_mut().engine.clear_cell(addr);
+            }
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    /// True if record `r` (zero-based, below the input header)
+    /// satisfies any of the criteria rows. A criterion row matches
+    /// when every non-empty criterion cell in that row matches the
+    /// corresponding input field. Field-name matching is
+    /// case-insensitive label equality. Numeric criteria match by
+    /// equality. Empty criterion cells impose no constraint. Any
+    /// other criterion type (formula, date, ...) is treated as
+    /// "no match" for this MVP slice.
+    fn query_record_matches(&self, input: Range, criteria: Range, record_idx: u32) -> bool {
+        let in_row = input.start.row + 1 + record_idx;
+        let n_input_cols = (input.end.col - input.start.col + 1) as usize;
+        let input_field_names: Vec<String> = (0..n_input_cols)
+            .map(|i| {
+                let addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + i as u16,
+                    input.start.row,
+                );
+                self.cell_label_lower(addr).unwrap_or_default()
+            })
+            .collect();
+        let n_crit_cols = (criteria.end.col - criteria.start.col + 1) as usize;
+        let n_crit_rows = criteria.end.row.saturating_sub(criteria.start.row);
+        if n_crit_rows == 0 {
+            return false;
+        }
+        for cr in 0..n_crit_rows {
+            let crit_row = criteria.start.row + 1 + cr;
+            let mut all_match = true;
+            let mut any_constraint = false;
+            for cc in 0..n_crit_cols {
+                let crit_addr = Address::new(
+                    criteria.start.sheet,
+                    criteria.start.col + cc as u16,
+                    crit_row,
+                );
+                let Some(crit_contents) = self.wb().cells.get(&crit_addr) else {
+                    continue;
+                };
+                if matches!(crit_contents, CellContents::Empty) {
+                    continue;
+                }
+                any_constraint = true;
+                let crit_field_name_addr = Address::new(
+                    criteria.start.sheet,
+                    criteria.start.col + cc as u16,
+                    criteria.start.row,
+                );
+                let Some(field_name) = self.cell_label_lower(crit_field_name_addr) else {
+                    all_match = false;
+                    break;
+                };
+                let Some(in_col_offset) = input_field_names.iter().position(|n| n == &field_name)
+                else {
+                    all_match = false;
+                    break;
+                };
+                let in_addr = Address::new(
+                    input.start.sheet,
+                    input.start.col + in_col_offset as u16,
+                    in_row,
+                );
+                let in_contents = self.wb().cells.get(&in_addr);
+                if !cell_values_equal_for_query(crit_contents, in_contents) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match && any_constraint {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Read a cell's label text, lowercased, for case-insensitive
+    /// header / field-name matching. Returns `None` for non-label
+    /// cells.
+    fn cell_label_lower(&self, addr: Address) -> Option<String> {
+        match self.wb().cells.get(&addr)? {
+            CellContents::Label { text, .. } => Some(text.to_ascii_lowercase()),
+            CellContents::Constant(Value::Text(s)) => Some(s.to_ascii_lowercase()),
+            _ => None,
+        }
+    }
+
+    /// `/Data Parse Format-Line Create` — read the first non-empty
+    /// label below the input column's top row and emit a format
+    /// line classifying each char run (digits/sign/dot → `V`,
+    /// whitespace gaps stay as spaces, anything else → `L`).
+    /// Writes the result as an apostrophe-prefixed label into the
+    /// top of the input column. Refuses with a status-line error
+    /// when no input column is set or the data row isn't a label.
+    fn execute_parse_format_line_create(&mut self) {
+        let Some(input) = self.data_parse.input_range else {
+            self.set_error("Parse Format-Line: set Input-Column first");
+            return;
+        };
+        let r = input.normalized();
+        let sheet = r.start.sheet;
+        let col = r.start.col;
+        let fl_addr = Address::new(sheet, col, r.start.row);
+        let mut data_text: Option<String> = None;
+        for row in (r.start.row + 1)..=r.end.row {
+            let addr = Address::new(sheet, col, row);
+            if let Some(CellContents::Label { text, .. }) = self.wb().cells.get(&addr) {
+                if !text.is_empty() {
+                    data_text = Some(text.clone());
+                    break;
+                }
+            }
+        }
+        let Some(text) = data_text else {
+            self.set_error("Parse Format-Line: no label data row to derive from");
+            return;
+        };
+        let fl = build_format_line(&text);
+        let prev = self.wb().cells.get(&fl_addr).cloned();
+        let new_cell = label_cell(&fl);
+        self.wb_mut().cells.insert(fl_addr, new_cell.clone());
+        self.push_to_engine_at(fl_addr, &new_cell);
+        if self.undo_enabled {
+            let mut prev_cells = Vec::new();
+            if let Some(c) = prev {
+                prev_cells.push((fl_addr, c));
+            }
+            if !prev_cells.is_empty() {
+                self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                    cells: prev_cells,
+                    formats: Vec::new(),
+                    text_styles: Vec::new(),
+                });
+            }
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.enter_data_parse_menu();
+    }
+
+    /// `/Data Parse Format-Line Edit` — move the pointer to the
+    /// format-line cell (top of the input column) and open it in
+    /// EDIT mode. Refuses with a status-line error when no input
+    /// column is set.
+    fn execute_parse_format_line_edit(&mut self) {
+        let Some(input) = self.data_parse.input_range else {
+            self.set_error("Parse Format-Line: set Input-Column first");
+            return;
+        };
+        let r = input.normalized();
+        let fl_addr = Address::new(r.start.sheet, r.start.col, r.start.row);
+        self.wb_mut().pointer = fl_addr;
+        self.scroll_into_view();
+        self.menu = None;
+        self.begin_edit();
+    }
+
+    /// `/Data Parse Go` — split each label in `input_range` (rows
+    /// 2..N; row 1 holds the format-line label) according to the
+    /// fields encoded in the format line, and write the parsed
+    /// fields starting at `output_anchor`. Silent no-op when the
+    /// input range or output anchor is unset, when the format-line
+    /// row isn't a label starting with `|`, or when the format
+    /// line declares zero non-skip fields.
+    fn execute_data_parse(&mut self) {
+        let Some(input) = self.data_parse.input_range else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(anchor) = self.data_parse.output_anchor else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let r = input.normalized();
+        let sheet = r.start.sheet;
+        let col = r.start.col;
+        let fl_row = r.start.row;
+        let fl_addr = Address::new(sheet, col, fl_row);
+        let fl_text = match self.wb().cells.get(&fl_addr) {
+            Some(CellContents::Label { text, .. }) if text.starts_with('|') => text.clone(),
+            _ => {
+                self.set_error("Parse: top of input column must be a `|`-prefixed format line");
+                return;
+            }
+        };
+        let fields = parse_format_line(&fl_text);
+        if fields.is_empty() {
+            self.set_error("Parse: format line declares no fields");
+            return;
+        }
+
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        let mut data_row_idx: u32 = 0;
+        for in_row in (fl_row + 1)..=r.end.row {
+            let in_addr = Address::new(sheet, col, in_row);
+            let label_text = match self.wb().cells.get(&in_addr) {
+                Some(CellContents::Label { text, .. }) => text.clone(),
+                _ => {
+                    data_row_idx += 1;
+                    continue;
+                }
+            };
+            let chars: Vec<char> = label_text.chars().collect();
+            let mut out_col_idx: u16 = 0;
+            for &(start, end, kind) in &fields {
+                if kind == FormatField::Skip {
+                    out_col_idx += 1;
+                    continue;
+                }
+                let slice: String = chars
+                    .iter()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect();
+                let trimmed = slice.trim();
+                let out_addr =
+                    Address::new(sheet, anchor.col + out_col_idx, anchor.row + data_row_idx);
+                if !trimmed.is_empty() {
+                    if let Some(c) = self.wb().cells.get(&out_addr) {
+                        prev_cells.push((out_addr, c.clone()));
+                    }
+                    if let Some(f) = self.wb().cell_formats.get(&out_addr) {
+                        prev_formats.push((out_addr, *f));
+                    }
+                    if let Some(s) = self.wb().cell_text_styles.get(&out_addr) {
+                        prev_text_styles.push((out_addr, *s));
+                    }
+                    let contents = match kind {
+                        FormatField::Value => match trimmed.parse::<f64>() {
+                            Ok(n) => CellContents::Constant(Value::Number(n)),
+                            Err(_) => label_cell(trimmed),
+                        },
+                        FormatField::Label | FormatField::Date | FormatField::Time => {
+                            label_cell(trimmed)
+                        }
+                        FormatField::Skip => unreachable!(),
+                    };
+                    self.wb_mut().cells.insert(out_addr, contents.clone());
+                    self.push_to_engine_at(out_addr, &contents);
+                }
+                out_col_idx += 1;
+            }
+            data_row_idx += 1;
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    fn enter_data_regression_menu(&mut self) {
+        self.menu = Some(MenuState::rooted_at(menu::DATA_REGRESSION_MENU));
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data Regression` — univariate ordinary least-squares
+    /// linear regression. Reads numeric values from the configured
+    /// X and Y ranges (must be the same length), computes
+    /// `y = a + b*x`, and writes a labeled output table at
+    /// `output_anchor`. Silent no-op when X, Y, or output anchor
+    /// is unset, or when the ranges have fewer than 2 numeric
+    /// points (degrees of freedom would be non-positive).
+    fn execute_data_regression(&mut self) {
+        let Some(x_range) = self.data_regression.x_range else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(y_range) = self.data_regression.y_range else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+        let Some(anchor) = self.data_regression.output_anchor else {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        };
+
+        let xs = self.collect_numeric_column(x_range);
+        let ys = self.collect_numeric_column(y_range);
+        let n = xs.len().min(ys.len());
+        if n < 2 {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        }
+        let nf = n as f64;
+        let sum_x: f64 = xs.iter().take(n).sum();
+        let sum_y: f64 = ys.iter().take(n).sum();
+        let mean_x = sum_x / nf;
+        let mean_y = sum_y / nf;
+        let mut sxx = 0.0_f64;
+        let mut syy = 0.0_f64;
+        let mut sxy = 0.0_f64;
+        for i in 0..n {
+            let dx = xs[i] - mean_x;
+            let dy = ys[i] - mean_y;
+            sxx += dx * dx;
+            syy += dy * dy;
+            sxy += dx * dy;
+        }
+        let force_zero = self.data_regression.intercept_zero;
+        let (b, a) = if force_zero {
+            let sxx_raw: f64 = xs.iter().take(n).map(|x| x * x).sum();
+            let sxy_raw: f64 = (0..n).map(|i| xs[i] * ys[i]).sum();
+            (sxy_raw / sxx_raw, 0.0_f64)
+        } else if sxx == 0.0 {
+            (0.0_f64, mean_y)
+        } else {
+            let b = sxy / sxx;
+            (b, mean_y - b * mean_x)
+        };
+        let r_squared = if syy == 0.0 || sxx == 0.0 {
+            1.0
+        } else {
+            (sxy * sxy) / (sxx * syy)
+        };
+        let mut rss = 0.0_f64;
+        for i in 0..n {
+            let pred = a + b * xs[i];
+            let r = ys[i] - pred;
+            rss += r * r;
+        }
+        let df = if force_zero {
+            n - 1
+        } else {
+            n.saturating_sub(2)
+        };
+        let dff = df.max(1) as f64;
+        let s_y_est = (rss / dff).sqrt();
+        let se_b = if sxx > 0.0 {
+            (s_y_est * s_y_est / sxx).sqrt()
+        } else {
+            0.0
+        };
+
+        let sheet = anchor.sheet;
+        let label_col = anchor.col;
+        let value_col = anchor.col + 1;
+        let r0 = anchor.row;
+        let writes: Vec<(Address, CellContents)> = vec![
+            (
+                Address::new(sheet, label_col, r0),
+                label_cell("Regression Output:"),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 2),
+                label_cell("Constant"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 2),
+                CellContents::Constant(Value::Number(a)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 3),
+                label_cell("Std Err of Y Est"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 3),
+                CellContents::Constant(Value::Number(s_y_est)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 4),
+                label_cell("R Squared"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 4),
+                CellContents::Constant(Value::Number(r_squared)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 5),
+                label_cell("No. of Observations"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 5),
+                CellContents::Constant(Value::Number(n as f64)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 6),
+                label_cell("Degrees of Freedom"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 6),
+                CellContents::Constant(Value::Number(df as f64)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 8),
+                label_cell("X Coefficient(s)"),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 8),
+                CellContents::Constant(Value::Number(b)),
+            ),
+            (
+                Address::new(sheet, label_col, r0 + 9),
+                label_cell("Std Err of Coef."),
+            ),
+            (
+                Address::new(sheet, value_col, r0 + 9),
+                CellContents::Constant(Value::Number(se_b)),
+            ),
+        ];
+
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        for (addr, contents) in &writes {
+            if let Some(c) = self.wb().cells.get(addr) {
+                prev_cells.push((*addr, c.clone()));
+            }
+            if let Some(f) = self.wb().cell_formats.get(addr) {
+                prev_formats.push((*addr, *f));
+            }
+            if let Some(s) = self.wb().cell_text_styles.get(addr) {
+                prev_text_styles.push((*addr, *s));
+            }
+            self.wb_mut().cells.insert(*addr, contents.clone());
+            self.push_to_engine_at(*addr, contents);
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.menu = None;
+        self.mode = Mode::Ready;
+    }
+
+    /// Walk a range column-major and collect every numeric cell value.
+    /// Used by /Data Regression to build its X / Y vectors.
+    fn collect_numeric_column(&self, range: Range) -> Vec<f64> {
+        let r = range.normalized();
+        let mut out = Vec::new();
+        for col in r.start.col..=r.end.col {
+            for row in r.start.row..=r.end.row {
+                let addr = Address::new(r.start.sheet, col, row);
+                if let Some(n) = self.numeric_cell_value(addr) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// `/Data Distribution` — count how many cells in `values`
+    /// fall into each bin defined by ascending thresholds in
+    /// `bins` (must be a single column). Writes counts to the
+    /// column immediately right of the bins, plus one extra row
+    /// at the bottom for the over-the-largest-bin overflow count.
+    /// Multi-column bins are silently treated as their first
+    /// column to match 1-2-3's "use the leftmost cell" behavior.
+    /// Journals overwritten cells for Alt-F4.
+    fn execute_data_distribution(&mut self, values: Range, bins: Range) {
+        let v = values.normalized();
+        let b = bins.normalized();
+        let bin_col = b.start.col;
+        let out_col = bin_col + 1;
+        let bin_sheet = b.start.sheet;
+        let val_sheet = v.start.sheet;
+
+        let mut bin_thresholds: Vec<(u32, f64)> = Vec::new();
+        for row in b.start.row..=b.end.row {
+            let addr = Address::new(bin_sheet, bin_col, row);
+            if let Some(n) = self.numeric_cell_value(addr) {
+                bin_thresholds.push((row, n));
+            }
+        }
+        if bin_thresholds.is_empty() {
+            self.menu = None;
+            self.mode = Mode::Ready;
+            return;
+        }
+
+        let mut samples: Vec<f64> = Vec::new();
+        for row in v.start.row..=v.end.row {
+            for col in v.start.col..=v.end.col {
+                let addr = Address::new(val_sheet, col, row);
+                if let Some(n) = self.numeric_cell_value(addr) {
+                    samples.push(n);
+                }
+            }
+        }
+
+        let mut counts: Vec<u64> = vec![0; bin_thresholds.len() + 1];
+        for s in &samples {
+            let mut placed = false;
+            for (i, (_, thr)) in bin_thresholds.iter().enumerate() {
+                if *s <= *thr {
+                    counts[i] += 1;
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                let last = counts.len() - 1;
+                counts[last] += 1;
+            }
+        }
+
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        let mut write = |app: &mut Self, addr: Address, count: u64| {
+            if let Some(c) = app.wb().cells.get(&addr) {
+                prev_cells.push((addr, c.clone()));
+            }
+            if let Some(f) = app.wb().cell_formats.get(&addr) {
+                prev_formats.push((addr, *f));
+            }
+            if let Some(s) = app.wb().cell_text_styles.get(&addr) {
+                prev_text_styles.push((addr, *s));
+            }
+            let s = count.to_string();
+            let _ = app.wb_mut().engine.set_user_input(addr, &s);
+            app.wb_mut()
+                .cells
+                .insert(addr, CellContents::Constant(Value::Number(count as f64)));
+        };
+        for (i, (row, _)) in bin_thresholds.iter().enumerate() {
+            let addr = Address::new(bin_sheet, out_col, *row);
+            write(self, addr, counts[i]);
+        }
+        let overflow_row = bin_thresholds.last().unwrap().0 + 1;
+        let overflow_addr = Address::new(bin_sheet, out_col, overflow_row);
+        let overflow_count = *counts.last().unwrap();
+        write(self, overflow_addr, overflow_count);
+
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.mode = Mode::Ready;
+    }
+
+    /// Numeric value at `addr` for /Data Distribution / Sort —
+    /// reads from `cells` and unwraps cached formula values too.
+    /// Returns `None` for blanks, labels, errors, and unevaluated
+    /// formulas.
+    fn numeric_cell_value(&self, addr: Address) -> Option<f64> {
+        match self.wb().cells.get(&addr)? {
+            CellContents::Constant(Value::Number(n)) => Some(*n),
+            CellContents::Formula {
+                cached_value: Some(Value::Number(n)),
+                ..
+            } => Some(*n),
+            _ => None,
+        }
+    }
+
+    fn start_data_fill_start_prompt(&mut self, range: Range) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter Start value:".into(),
+            buffer: "0".into(),
+            next: PromptNext::DataFillStart { range },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_data_fill_step_prompt(&mut self, range: Range, start: f64) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter Step value:".into(),
+            buffer: "1".into(),
+            next: PromptNext::DataFillStep { range, start },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_data_fill_stop_prompt(&mut self, range: Range, start: f64, step: f64) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter Stop value:".into(),
+            buffer: "2047".into(),
+            next: PromptNext::DataFillStop { range, start, step },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// Write `start, start+step, start+2*step, ...` into `range`
+    /// column-major (down each column, then to the next column),
+    /// stopping at either the end of the range or when the next
+    /// computed value would cross `stop`. Captures previous cell
+    /// contents into a `RangeRestore` journal entry so Alt-F4 reverts.
+    fn execute_data_fill(&mut self, range: Range, start: f64, step: f64, stop: f64) {
+        let r = range.normalized();
+        let sheet = r.start.sheet;
+        let mut prev_cells: Vec<(Address, CellContents)> = Vec::new();
+        let mut prev_formats: Vec<(Address, Format)> = Vec::new();
+        let mut prev_text_styles: Vec<(Address, TextStyle)> = Vec::new();
+        let mut value = start;
+        'outer: for col in r.start.col..=r.end.col {
+            for row in r.start.row..=r.end.row {
+                if step >= 0.0 && value > stop {
+                    break 'outer;
+                }
+                if step < 0.0 && value < stop {
+                    break 'outer;
+                }
+                let addr = Address::new(sheet, col, row);
+                if let Some(c) = self.wb().cells.get(&addr) {
+                    prev_cells.push((addr, c.clone()));
+                }
+                if let Some(f) = self.wb().cell_formats.get(&addr) {
+                    prev_formats.push((addr, *f));
+                }
+                if let Some(s) = self.wb().cell_text_styles.get(&addr) {
+                    prev_text_styles.push((addr, *s));
+                }
+                let s = l123_core::format_number_general(value);
+                let _ = self.wb_mut().engine.set_user_input(addr, &s);
+                self.wb_mut()
+                    .cells
+                    .insert(addr, CellContents::Constant(Value::Number(value)));
+                value += step;
+            }
+        }
+        if self.undo_enabled
+            && (!prev_cells.is_empty() || !prev_formats.is_empty() || !prev_text_styles.is_empty())
+        {
+            self.wb_mut().journal.push(JournalEntry::RangeRestore {
+                cells: prev_cells,
+                formats: prev_formats,
+                text_styles: prev_text_styles,
+            });
+        }
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+        self.mode = Mode::Ready;
+    }
 
     fn start_decimals_prompt(&mut self, kind: FormatKind) {
         self.menu = None;
@@ -7628,6 +10698,478 @@ impl App {
         self.mode = Mode::Menu;
     }
 
+    fn range_name_reset(&mut self) {
+        let prev: Vec<(String, Range)> = self
+            .wb()
+            .named_ranges
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        if !prev.is_empty() {
+            for (name, _) in &prev {
+                let _ = self.wb_mut().engine.delete_name(name);
+            }
+            self.wb_mut().named_ranges.clear();
+            self.wb_mut().name_notes.clear();
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.push_journal_batch(vec![JournalEntry::RangeNameReset { prev }]);
+            self.wb_mut().dirty = true;
+        }
+        self.close_menu();
+    }
+
+    fn range_name_note_reset(&mut self) {
+        let prev: Vec<(String, String)> = self
+            .wb()
+            .name_notes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !prev.is_empty() {
+            self.wb_mut().name_notes.clear();
+            self.push_journal_batch(vec![JournalEntry::RangeNameNoteReset { prev }]);
+            self.wb_mut().dirty = true;
+        }
+        self.close_menu();
+    }
+
+    fn execute_range_protection(&mut self, range: Range, unprotected: bool) {
+        let r = range.normalized();
+        let mut entries: Vec<(Address, bool)> = Vec::new();
+        for row in r.start.row..=r.end.row {
+            for col in r.start.col..=r.end.col {
+                let addr = Address::new(r.start.sheet, col, row);
+                let was = self.wb().cell_unprotected.contains(&addr);
+                if was == unprotected {
+                    continue;
+                }
+                if unprotected {
+                    self.wb_mut().cell_unprotected.insert(addr);
+                } else {
+                    self.wb_mut().cell_unprotected.remove(&addr);
+                }
+                entries.push((addr, was));
+            }
+        }
+        if !entries.is_empty() {
+            self.push_journal_batch(vec![JournalEntry::RangeProtection { entries }]);
+            self.wb_mut().dirty = true;
+        }
+    }
+
+    /// True when an edit to `addr` is currently refused — i.e. global
+    /// protection is on and the cell is not in the unprotected set.
+    /// `/Range Input` lifts the gate inside its range so the user can
+    /// fill the form even while protection is active.
+    fn is_cell_protected(&self, addr: Address) -> bool {
+        if !self.global_protection {
+            return false;
+        }
+        self.input_range
+            .as_ref()
+            .is_none_or(|r| !r.normalized().contains(addr))
+            && !self.wb().cell_unprotected.contains(&addr)
+    }
+
+    fn enter_input_mode(&mut self, range: Range) {
+        let r = range.normalized();
+        if let Some(addr) = self.first_unprotected_in(r) {
+            self.wb_mut().pointer = addr;
+        }
+        self.input_range = Some(r);
+        self.mode = Mode::Ready;
+    }
+
+    fn exit_input_mode(&mut self) {
+        self.input_range = None;
+    }
+
+    fn first_unprotected_in(&self, r: Range) -> Option<Address> {
+        for row in r.start.row..=r.end.row {
+            for col in r.start.col..=r.end.col {
+                let addr = Address::new(r.start.sheet, col, row);
+                if self.wb().cell_unprotected.contains(&addr) {
+                    return Some(addr);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the next unprotected cell within the active input range
+    /// in `(d_col, d_row)` direction from `from`. Stops at the range
+    /// edge — does not wrap. Returns `None` when no unprotected cell
+    /// exists in that direction.
+    fn next_unprotected(&self, from: Address, d_col: i32, d_row: i32) -> Option<Address> {
+        let r = self.input_range?.normalized();
+        let mut cur = from;
+        loop {
+            cur = cur.shifted(d_col, d_row)?;
+            if !r.contains(cur) {
+                return None;
+            }
+            if self.wb().cell_unprotected.contains(&cur) {
+                return Some(cur);
+            }
+        }
+    }
+
+    fn execute_range_value(&mut self, src: Range, dst: Address) {
+        let s = src.normalized();
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for row in s.start.row..=s.end.row {
+            for col in s.start.col..=s.end.col {
+                let src_addr = Address::new(s.start.sheet, col, row);
+                let target = Address::new(
+                    dst.sheet,
+                    dst.col + (col - s.start.col),
+                    dst.row + (row - s.start.row),
+                );
+                let new_contents = freeze_to_value(self.wb().cells.get(&src_addr).cloned());
+                self.write_cell_with_undo(target, new_contents, &mut writes);
+            }
+        }
+        self.finish_range_write(writes);
+    }
+
+    fn execute_range_trans(&mut self, src: Range, dst: Address) {
+        let s = src.normalized();
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for row in s.start.row..=s.end.row {
+            for col in s.start.col..=s.end.col {
+                let src_addr = Address::new(s.start.sheet, col, row);
+                let dr = (col - s.start.col) as u32;
+                let dc = row - s.start.row;
+                let target =
+                    Address::new(dst.sheet, dst.col.saturating_add(dc as u16), dst.row + dr);
+                let new_contents = freeze_to_value(self.wb().cells.get(&src_addr).cloned());
+                self.write_cell_with_undo(target, new_contents, &mut writes);
+            }
+        }
+        self.finish_range_write(writes);
+    }
+
+    fn execute_range_justify(&mut self, range: Range) {
+        let r = range.normalized();
+        let sheet = r.start.sheet;
+        let col = r.start.col;
+        // Concatenate all label cells in the leftmost column.
+        let mut text = String::new();
+        for row in r.start.row..=r.end.row {
+            let addr = Address::new(sheet, col, row);
+            match self.wb().cells.get(&addr) {
+                Some(CellContents::Label { text: t, .. }) => {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push_str(t);
+                }
+                Some(CellContents::Empty) | None => break,
+                _ => break,
+            }
+        }
+        if text.is_empty() {
+            return;
+        }
+        // Width = column width of the leftmost column.
+        let width = self.col_width_of(sheet, col) as usize;
+        let lines = wrap_text_to_width(&text, width.max(1));
+        let max_rows = (r.end.row - r.start.row + 1) as usize;
+        let to_write = lines.into_iter().take(max_rows).collect::<Vec<_>>();
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (i, line) in to_write.iter().enumerate() {
+            let addr = Address::new(sheet, col, r.start.row + i as u32);
+            self.write_cell_with_undo(
+                addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: line.clone(),
+                },
+                &mut writes,
+            );
+        }
+        // Clear any leftover rows in the original block.
+        for i in to_write.len()..=(r.end.row - r.start.row) as usize {
+            let addr = Address::new(sheet, col, r.start.row + i as u32);
+            self.write_cell_with_undo(addr, CellContents::Empty, &mut writes);
+        }
+        self.finish_range_write(writes);
+    }
+
+    fn finish_range_write(&mut self, writes: Vec<(Address, Option<CellContents>)>) {
+        if writes.is_empty() {
+            return;
+        }
+        self.push_journal_batch(vec![JournalEntry::RangeRestore {
+            cells: writes
+                .into_iter()
+                .map(|(addr, prev)| (addr, prev.unwrap_or(CellContents::Empty)))
+                .collect(),
+            formats: Vec::new(),
+            text_styles: Vec::new(),
+        }]);
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.wb_mut().dirty = true;
+    }
+
+    fn execute_range_name_labels(&mut self, range: Range, direction: LabelDirection) {
+        let r = range.normalized();
+        let (dc, dr): (i32, i32) = match direction {
+            LabelDirection::Right => (1, 0),
+            LabelDirection::Down => (0, 1),
+            LabelDirection::Left => (-1, 0),
+            LabelDirection::Up => (0, -1),
+        };
+        let mut created: Vec<String> = Vec::new();
+        let mut overwritten: Vec<(String, Range)> = Vec::new();
+        for row in r.start.row..=r.end.row {
+            for col in r.start.col..=r.end.col {
+                let addr = Address::new(r.start.sheet, col, row);
+                let Some(CellContents::Label { text, .. }) = self.wb().cells.get(&addr).cloned()
+                else {
+                    continue;
+                };
+                if !is_valid_range_name(&text) {
+                    continue;
+                }
+                let Some(target) = addr.shifted(dc, dr) else {
+                    continue;
+                };
+                let target_range = Range {
+                    start: target,
+                    end: target,
+                };
+                let key = text.to_ascii_lowercase();
+                if let Some(prior) = self.wb().named_ranges.get(&key).copied() {
+                    overwritten.push((key.clone(), prior));
+                    let _ = self.wb_mut().engine.delete_name(&key);
+                }
+                if self
+                    .wb_mut()
+                    .engine
+                    .define_name(&text, target_range)
+                    .is_ok()
+                {
+                    self.wb_mut().named_ranges.insert(key.clone(), target_range);
+                    if !created.contains(&key) {
+                        created.push(key);
+                    }
+                }
+            }
+        }
+        if !created.is_empty() || !overwritten.is_empty() {
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.push_journal_batch(vec![JournalEntry::RangeNameLabels {
+                created,
+                overwritten,
+            }]);
+            self.wb_mut().dirty = true;
+        }
+    }
+
+    fn execute_range_name_table(&mut self, anchor: Address) {
+        let mut entries: Vec<(String, Range)> = self
+            .wb()
+            .named_ranges
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (i, (name, range)) in entries.iter().enumerate() {
+            let row = anchor.row.saturating_add(i as u32);
+            let name_addr = Address::new(anchor.sheet, anchor.col, row);
+            let range_addr = Address::new(anchor.sheet, anchor.col.saturating_add(1), row);
+            self.write_cell_with_undo(
+                name_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: name.clone(),
+                },
+                &mut writes,
+            );
+            self.write_cell_with_undo(
+                range_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: range_to_lotus_form(*range),
+                },
+                &mut writes,
+            );
+        }
+        if !writes.is_empty() {
+            self.push_journal_batch(vec![JournalEntry::RangeRestore {
+                cells: writes
+                    .into_iter()
+                    .map(|(addr, prev)| (addr, prev.unwrap_or(CellContents::Empty)))
+                    .collect(),
+                formats: Vec::new(),
+                text_styles: Vec::new(),
+            }]);
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.wb_mut().dirty = true;
+        }
+    }
+
+    fn execute_range_name_note_table(&mut self, anchor: Address) {
+        let mut entries: Vec<(String, Range, String)> = self
+            .wb()
+            .named_ranges
+            .iter()
+            .map(|(k, v)| {
+                let note = self.wb().name_notes.get(k).cloned().unwrap_or_default();
+                (k.clone(), *v, note)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (i, (name, range, note)) in entries.iter().enumerate() {
+            let row = anchor.row.saturating_add(i as u32);
+            let name_addr = Address::new(anchor.sheet, anchor.col, row);
+            let range_addr = Address::new(anchor.sheet, anchor.col.saturating_add(1), row);
+            let note_addr = Address::new(anchor.sheet, anchor.col.saturating_add(2), row);
+            self.write_cell_with_undo(
+                name_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: name.clone(),
+                },
+                &mut writes,
+            );
+            self.write_cell_with_undo(
+                range_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: range_to_lotus_form(*range),
+                },
+                &mut writes,
+            );
+            self.write_cell_with_undo(
+                note_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: note.clone(),
+                },
+                &mut writes,
+            );
+        }
+        if !writes.is_empty() {
+            self.push_journal_batch(vec![JournalEntry::RangeRestore {
+                cells: writes
+                    .into_iter()
+                    .map(|(addr, prev)| (addr, prev.unwrap_or(CellContents::Empty)))
+                    .collect(),
+                formats: Vec::new(),
+                text_styles: Vec::new(),
+            }]);
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.wb_mut().dirty = true;
+        }
+    }
+
+    fn write_cell_with_undo(
+        &mut self,
+        addr: Address,
+        contents: CellContents,
+        writes: &mut Vec<(Address, Option<CellContents>)>,
+    ) {
+        let prev = self.wb().cells.get(&addr).cloned();
+        writes.push((addr, prev));
+        self.wb_mut().cells.insert(addr, contents.clone());
+        self.push_to_engine_at(addr, &contents);
+    }
+
+    fn restore_cell_contents(&mut self, addr: Address, prev: Option<CellContents>) {
+        match prev {
+            Some(c) => {
+                self.wb_mut().cells.insert(addr, c.clone());
+                self.push_to_engine_at(addr, &c);
+            }
+            None => {
+                self.wb_mut().cells.remove(&addr);
+                let _ = self.wb_mut().engine.clear_cell(addr);
+            }
+        }
+    }
+
+    fn execute_range_name_undefine(&mut self, name: &str) {
+        let key = name.to_ascii_lowercase();
+        let Some(range) = self.wb().named_ranges.get(&key).copied() else {
+            return;
+        };
+        let prior_note = self.wb().name_notes.get(&key).cloned();
+        let literal = range_to_lotus_form(range);
+        let cell_addrs: Vec<Address> = self
+            .wb()
+            .cells
+            .iter()
+            .filter_map(|(addr, c)| match c {
+                CellContents::Formula { expr, .. } if formula_uses_name(expr, &key) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        let mut cell_writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for addr in cell_addrs {
+            let Some(CellContents::Formula { expr, .. }) = self.wb().cells.get(&addr).cloned()
+            else {
+                continue;
+            };
+            let new_expr = replace_name_in_formula(&expr, &key, &literal);
+            let new_contents = CellContents::Formula {
+                expr: new_expr,
+                cached_value: None,
+            };
+            let prev = self.wb().cells.get(&addr).cloned();
+            cell_writes.push((addr, prev));
+            self.wb_mut().cells.insert(addr, new_contents.clone());
+            self.push_to_engine_at(addr, &new_contents);
+        }
+        let _ = self.wb_mut().engine.delete_name(&key);
+        self.wb_mut().named_ranges.remove(&key);
+        self.wb_mut().name_notes.remove(&key);
+        self.wb_mut().engine.recalc();
+        self.refresh_formula_caches();
+        self.push_journal_batch(vec![JournalEntry::RangeNameUndefine {
+            name: key,
+            range,
+            note: prior_note,
+            cell_writes,
+        }]);
+        self.wb_mut().dirty = true;
+    }
+
+    fn set_range_name_note(&mut self, name: &str, note: String) {
+        let key = name.to_ascii_lowercase();
+        if !self.wb().named_ranges.contains_key(&key) {
+            return;
+        }
+        let prev = self.wb().name_notes.get(&key).cloned();
+        if note.is_empty() {
+            self.wb_mut().name_notes.remove(&key);
+        } else {
+            self.wb_mut().name_notes.insert(key.clone(), note);
+        }
+        self.push_journal_batch(vec![JournalEntry::RangeNameNote { name: key, prev }]);
+        self.wb_mut().dirty = true;
+    }
+
+    fn delete_range_name_note(&mut self, name: &str) {
+        let key = name.to_ascii_lowercase();
+        let Some(prev) = self.wb_mut().name_notes.remove(&key) else {
+            return;
+        };
+        self.push_journal_batch(vec![JournalEntry::RangeNameNote {
+            name: key,
+            prev: Some(prev),
+        }]);
+        self.wb_mut().dirty = true;
+    }
+
     /// Snapshot the workbook's defined range names into the F3 NAMES
     /// overlay, keyed by ascii-lowercase ordering. Underlying state
     /// (POINT or prompt) is left untouched so dismissal returns to it.
@@ -7654,7 +11196,12 @@ impl App {
     fn open_name_list_from_prompt(&mut self) {
         let origin = match self.prompt.as_ref().map(|p| p.next) {
             Some(PromptNext::Goto) => NameListOrigin::Goto,
-            Some(PromptNext::RangeNameDelete) => NameListOrigin::PromptName,
+            Some(
+                PromptNext::RangeNameDelete
+                | PromptNext::RangeNameUndefine
+                | PromptNext::RangeNameNoteCreate
+                | PromptNext::RangeNameNoteDelete,
+            ) => NameListOrigin::PromptName,
             _ => return,
         };
         self.open_name_list(origin);
@@ -7785,6 +11332,18 @@ impl App {
                 self.recalc_iterations = n;
                 self.mode = Mode::Ready;
             }
+            PromptNext::DataFillStart { range } => {
+                let start: f64 = p.buffer.parse().unwrap_or(0.0);
+                self.start_data_fill_step_prompt(range, start);
+            }
+            PromptNext::DataFillStep { range, start } => {
+                let step: f64 = p.buffer.parse().unwrap_or(1.0);
+                self.start_data_fill_stop_prompt(range, start, step);
+            }
+            PromptNext::DataFillStop { range, start, step } => {
+                let stop: f64 = p.buffer.parse().unwrap_or(2047.0);
+                self.execute_data_fill(range, start, step, stop);
+            }
             PromptNext::RangeNameCreate => {
                 if p.buffer.is_empty() {
                     self.mode = Mode::Ready;
@@ -7799,9 +11358,51 @@ impl App {
                     self.wb_mut()
                         .named_ranges
                         .remove(&p.buffer.to_ascii_lowercase());
+                    self.wb_mut()
+                        .name_notes
+                        .remove(&p.buffer.to_ascii_lowercase());
                     self.wb_mut().engine.recalc();
                     self.refresh_formula_caches();
                     self.wb_mut().dirty = true;
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::RangeNameUndefine => {
+                if !p.buffer.is_empty() {
+                    let name = p.buffer.clone();
+                    self.execute_range_name_undefine(&name);
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::RangeNameNoteCreate => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let key = p.buffer.to_ascii_lowercase();
+                if !self.wb().named_ranges.contains_key(&key) {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                self.pending_name = Some(p.buffer);
+                self.prompt = Some(PromptState {
+                    label: "Enter note text:".into(),
+                    buffer: String::new(),
+                    next: PromptNext::RangeNameNoteCreateBody,
+                    fresh: false,
+                });
+                self.mode = Mode::Menu;
+            }
+            PromptNext::RangeNameNoteCreateBody => {
+                if let Some(name) = self.pending_name.take() {
+                    self.set_range_name_note(&name, p.buffer);
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::RangeNameNoteDelete => {
+                if !p.buffer.is_empty() {
+                    let name = p.buffer.clone();
+                    self.delete_range_name_note(&name);
                 }
                 self.mode = Mode::Ready;
             }
@@ -7817,8 +11418,7 @@ impl App {
                     self.save_confirm = Some(SaveConfirmState { path, highlight: 0 });
                     self.mode = Mode::Menu;
                 } else {
-                    self.save_workbook_to(path);
-                    self.mode = Mode::Ready;
+                    self.queue_file_save(path);
                 }
             }
             PromptNext::GraphSaveFilename => {
@@ -7836,7 +11436,9 @@ impl App {
                     self.mode = Mode::Ready;
                     return;
                 }
-                self.retrieve_by_extension(PathBuf::from(&p.buffer));
+                let path = PathBuf::from(&p.buffer);
+                let name = display_basename(&path);
+                self.queue_async_op("Loading", name, QueuedOp::FileRetrieve { path });
             }
             PromptNext::FileXtractFilename { kind } => {
                 if p.buffer.is_empty() {
@@ -7853,7 +11455,7 @@ impl App {
                     return;
                 }
                 let path = PathBuf::from(&p.buffer);
-                self.import_numbers_from(path);
+                self.queue_file_import(path, /* numeric_split = */ true);
             }
             PromptNext::FileImportTextFilename => {
                 if p.buffer.is_empty() {
@@ -7861,7 +11463,7 @@ impl App {
                     return;
                 }
                 let path = PathBuf::from(&p.buffer);
-                self.import_text_from(path);
+                self.queue_file_import(path, /* numeric_split = */ false);
             }
             PromptNext::FileEraseFilename => {
                 if p.buffer.is_empty() {
@@ -8308,17 +11910,27 @@ impl App {
     fn transition_point(&mut self, next: PendingCommand) {
         let source_tl = match next {
             PendingCommand::CopyTo { source } | PendingCommand::MoveTo { source } => source.start,
+            // /Data Distribution: spring back to the values-range
+            // top-left so the user navigates from a familiar landmark
+            // to the bin column.
+            PendingCommand::DataDistributionBins { values } => values.start,
+            PendingCommand::RangeValueTo { src } | PendingCommand::RangeTransTo { src } => {
+                src.start
+            }
             _ => self.wb_mut().pointer,
         };
         self.wb_mut().pointer = source_tl;
         self.scroll_into_view();
-        // Copy/Move TO start with no anchor so the user's pointer
-        // movement defaults to a single-cell destination (matches the
-        // M3 single-anchor flow). Pressing `.` anchors a multi-cell TO,
-        // which is what the Lotus tutorial "single source → fill multi
-        // destination" replicate flow needs.
+        // Copy/Move TO and DataDistribution Bins start with no anchor
+        // so the user can freely navigate to the destination/bin
+        // location. Pressing `.` anchors for a multi-cell extent
+        // (the standard 1-2-3 POINT muscle memory).
         let anchor = match next {
-            PendingCommand::CopyTo { .. } | PendingCommand::MoveTo { .. } => None,
+            PendingCommand::CopyTo { .. }
+            | PendingCommand::MoveTo { .. }
+            | PendingCommand::DataDistributionBins { .. }
+            | PendingCommand::RangeValueTo { .. }
+            | PendingCommand::RangeTransTo { .. } => None,
             _ => Some(self.wb().pointer),
         };
         self.point = Some(PointState {
@@ -8463,7 +12075,8 @@ impl App {
                 let names = self.wb_mut().engine.all_sheet_names();
                 let names_ref: Vec<&str> = names.iter().map(String::as_str).collect();
                 let cfg = parse_config_from(&self.wb().international);
-                let excel = l123_parse::to_engine_source_with_config(expr, &names_ref, &cfg);
+                let expanded = l123_parse::expand_cellpointer(expr, addr);
+                let excel = l123_parse::to_engine_source_with_config(&expanded, &names_ref, &cfg);
                 self.wb_mut().engine.set_user_input(addr, &excel)
             }
         };
@@ -8624,7 +12237,8 @@ impl App {
                 let names = self.wb_mut().engine.all_sheet_names();
                 let names_ref: Vec<&str> = names.iter().map(String::as_str).collect();
                 let cfg = parse_config_from(&self.wb().international);
-                let excel = l123_parse::to_engine_source_with_config(expr, &names_ref, &cfg);
+                let expanded = l123_parse::expand_cellpointer(expr, addr);
+                let excel = l123_parse::to_engine_source_with_config(&expanded, &names_ref, &cfg);
                 self.wb_mut().engine.set_user_input(addr, &excel)
             }
         };
@@ -8656,6 +12270,16 @@ impl App {
     }
 
     fn move_pointer(&mut self, d_col: i32, d_row: i32) {
+        if self.input_range.is_some() {
+            let from = self.wb().pointer;
+            if let Some(next) = self.next_unprotected(from, d_col, d_row) {
+                self.wb_mut().pointer = next;
+                self.scroll_into_view();
+            } else {
+                self.request_beep();
+            }
+            return;
+        }
         if let Some(next) = self.wb_mut().pointer.shifted(d_col, d_row) {
             self.wb_mut().pointer = next;
             self.scroll_into_view();
@@ -9804,6 +13428,13 @@ impl App {
             match self.mode {
                 Mode::Menu => self.render_menu_lines(),
                 Mode::Point => self.render_point_lines(),
+                Mode::Wait => {
+                    let l3 = match self.pending_async_op.as_ref() {
+                        Some(op) => Line::from(op.render_line3()),
+                        None => Line::from(""),
+                    };
+                    (Line::from(""), l3)
+                }
                 _ => {
                     let l2 = match self.entry.as_ref() {
                         Some(e) => render_entry_l2(e),
@@ -10696,46 +14327,43 @@ impl App {
                         .get(&m.anchor)
                         .map(|a| a.horizontal)
                         .unwrap_or(HAlign::General);
-                    let (painted_text, anchor_text_start, anchor_text_end) = match self
-                        .wb()
-                        .cells
-                        .get(&m.anchor)
-                    {
-                        None | Some(CellContents::Empty) => {
-                            (" ".repeat(span_w as usize), 0usize, 0usize)
-                        }
-                        Some(CellContents::Label { prefix, text }) => {
-                            let eff_prefix = effective_label_prefix(*prefix, halign);
-                            let painted = render_label(eff_prefix, text, span_w as usize);
-                            let (s, e) = label_text_bounds(
-                                eff_prefix,
-                                text.chars().count(),
-                                span_w as usize,
-                            );
-                            (painted, s, e)
-                        }
-                        Some(other) => {
-                            let fmt = self.format_for_cell(m.anchor);
-                            let s = render_own_width(
-                                other,
-                                span_w as usize,
-                                fmt,
-                                &self.wb().international,
-                            );
-                            let painted = apply_halign_to_rendered(&s, halign, span_w as usize);
-                            // Rendered values (numbers, formulas) have
-                            // no internal whitespace runs, so trimming
-                            // captures the text region exactly.
-                            let chars: Vec<char> = painted.chars().collect();
-                            let first = chars.iter().position(|c| *c != ' ');
-                            let last = chars.iter().rposition(|c| *c != ' ');
-                            let (ts, te) = match (first, last) {
-                                (Some(a), Some(b)) => (a, b + 1),
-                                _ => (0, 0),
-                            };
-                            (painted, ts, te)
-                        }
-                    };
+                    let (painted_text, anchor_text_start, anchor_text_end) =
+                        match self.wb().cells.get(&m.anchor) {
+                            None | Some(CellContents::Empty) => {
+                                (" ".repeat(span_w as usize), 0usize, 0usize)
+                            }
+                            Some(CellContents::Label { prefix, text }) => {
+                                let eff_prefix = effective_label_prefix(*prefix, halign);
+                                let painted = render_label(eff_prefix, text, span_w as usize);
+                                let (s, e) = label_text_bounds(
+                                    eff_prefix,
+                                    text.chars().count(),
+                                    span_w as usize,
+                                );
+                                (painted, s, e)
+                            }
+                            Some(other) => {
+                                let fmt = self.format_for_cell(m.anchor);
+                                let s = render_own_width(
+                                    other,
+                                    span_w as usize,
+                                    fmt,
+                                    &self.wb().international,
+                                );
+                                let painted = apply_halign_to_rendered(&s, halign, span_w as usize);
+                                // Rendered values (numbers, formulas) have
+                                // no internal whitespace runs, so trimming
+                                // captures the text region exactly.
+                                let chars: Vec<char> = painted.chars().collect();
+                                let first = chars.iter().position(|c| *c != ' ');
+                                let last = chars.iter().rposition(|c| *c != ' ');
+                                let (ts, te) = match (first, last) {
+                                    (Some(a), Some(b)) => (a, b + 1),
+                                    _ => (0, 0),
+                                };
+                                (painted, ts, te)
+                            }
+                        };
                     // Build the anchor's full visual style — same
                     // layering as the cell-paint loop: pointer
                     // suppresses fill/font; text-style modifiers
@@ -11309,6 +14937,328 @@ fn render_own_width(
 /// quirk in `Picker::from_query_stdio`: when the font-size probe
 /// fails (common in iTerm2), the library drops back to a default
 /// Halfblocks picker and discards its own iTerm2 env hint.
+/// Filename component used for the WAIT-mode line-3 noun, falling
+/// back to the empty string for paths without a final component.
+fn display_basename(path: &Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// True when `path` ends in `.wk3`/`.WK3`, regardless of whether
+/// the `wk3` cargo feature is on (callers gate the actual load
+/// behind their own `#[cfg]`). Factored out so the §4.7 async
+/// retrieve worker and the sync CLI-startup path agree.
+fn is_wk3_path(path: &Path) -> bool {
+    #[cfg(feature = "wk3")]
+    {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.eq_ignore_ascii_case("wk3"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "wk3"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Convert a CSV field to (UI cache contents, engine input string).
+/// Numeric tokens become `Constant(Number)` with a general-format
+/// engine string; everything else becomes an apostrophe-prefixed
+/// label. Used by both the worker and the sync CSV paths.
+fn csv_field_to_cell(field: &str) -> (CellContents, String) {
+    match field.parse::<f64>() {
+        Ok(n) => (
+            CellContents::Constant(Value::Number(n)),
+            l123_core::format_number_general(n),
+        ),
+        Err(_) => (
+            CellContents::Label {
+                prefix: LabelPrefix::Apostrophe,
+                text: field.to_string(),
+            },
+            format!("'{field}"),
+        ),
+    }
+}
+
+/// Read a file into a String, ticking `progress.done` as bytes
+/// arrive and bailing on `progress.cancel`. `progress.total` is
+/// pre-set to the file size so the renderer can draw a real
+/// `[████░░] N%` bar.
+fn read_file_with_progress(
+    path: &Path,
+    progress: &AsyncProgress,
+) -> std::result::Result<String, String> {
+    use std::io::Read;
+    let f =
+        std::fs::File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let total = f.metadata().map(|m| m.len()).unwrap_or(0);
+    progress.done.store(0, Ordering::Relaxed);
+    progress.total.store(total, Ordering::Relaxed);
+    let mut reader = std::io::BufReader::new(f);
+    let mut out = Vec::with_capacity(total as usize);
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        if progress.cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| format!("read error on {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&chunk[..n]);
+        progress.done.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    String::from_utf8(out).map_err(|e| format!("invalid UTF-8 in {}: {e}", path.display()))
+}
+
+/// §4.7 worker — `/File Retrieve`. Dispatches by extension. Builds
+/// a fresh engine on the worker so the caller's existing engine is
+/// untouched until the result is applied (cancellation = no-op
+/// against the workbook).
+fn worker_file_retrieve(path: PathBuf, progress: AsyncProgress) -> AsyncResult {
+    if progress.cancel.load(Ordering::Relaxed) {
+        return AsyncResult::Cancelled { engine: None };
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if ext.as_deref() == Some("csv") {
+        worker_csv_retrieve(path, progress)
+    } else {
+        worker_xlsx_retrieve(path, progress)
+    }
+}
+
+fn worker_xlsx_retrieve(path: PathBuf, progress: AsyncProgress) -> AsyncResult {
+    let is_wk3 = is_wk3_path(&path);
+    let mut engine = match IronCalcEngine::new() {
+        Ok(e) => e,
+        Err(err) => {
+            return AsyncResult::Errored {
+                engine: None,
+                message: err.to_string(),
+            }
+        }
+    };
+    let load_result = if is_wk3 {
+        #[cfg(feature = "wk3")]
+        {
+            engine.load_wk3(&path)
+        }
+        #[cfg(not(feature = "wk3"))]
+        {
+            engine.load_xlsx(&path)
+        }
+    } else {
+        engine.load_xlsx(&path)
+    };
+    if let Err(e) = load_result {
+        return AsyncResult::Errored {
+            engine: None,
+            message: format!("Cannot open {}: {e}", path.display()),
+        };
+    }
+    if progress.cancel.load(Ordering::Relaxed) {
+        return AsyncResult::Cancelled { engine: None };
+    }
+    AsyncResult::FileRetrieveXlsx {
+        engine,
+        path,
+        is_wk3,
+    }
+}
+
+fn worker_csv_retrieve(path: PathBuf, progress: AsyncProgress) -> AsyncResult {
+    let body = match read_file_with_progress(&path, &progress) {
+        Ok(b) => b,
+        Err(e) => {
+            return if e == "cancelled" {
+                AsyncResult::Cancelled { engine: None }
+            } else {
+                AsyncResult::Errored {
+                    engine: None,
+                    message: e,
+                }
+            }
+        }
+    };
+    let mut engine = match IronCalcEngine::new() {
+        Ok(e) => e,
+        Err(err) => {
+            return AsyncResult::Errored {
+                engine: None,
+                message: err.to_string(),
+            }
+        }
+    };
+    let rows = l123_io::csv::parse(&body);
+    let total_rows = rows.len() as u64;
+    progress.done.store(0, Ordering::Relaxed);
+    progress.total.store(total_rows.max(1), Ordering::Relaxed);
+    let mut cells = Vec::new();
+    for (dr, row) in rows.iter().enumerate() {
+        if progress.cancel.load(Ordering::Relaxed) {
+            return AsyncResult::Cancelled { engine: None };
+        }
+        for (dc, field) in row.iter().enumerate() {
+            if field.is_empty() {
+                continue;
+            }
+            let addr = Address::new(SheetId(0), dc as u16, dr as u32);
+            let (contents, engine_input) = csv_field_to_cell(field);
+            let _ = engine.set_user_input(addr, &engine_input);
+            cells.push((addr, contents));
+        }
+        progress.done.store((dr as u64) + 1, Ordering::Relaxed);
+    }
+    engine.recalc();
+    AsyncResult::FileRetrieveCsv {
+        engine,
+        path,
+        cells,
+    }
+}
+
+/// §4.7 worker — `/File Save`. The engine has been moved out of
+/// `Workbook` and travels with the op; the worker writes the xlsx
+/// (and the formula-source sidecar on success), then ships the
+/// engine back. Cancel before the save is honored; once
+/// `save_xlsx` is in flight the call is opaque.
+fn worker_file_save(
+    engine: IronCalcEngine,
+    path: PathBuf,
+    formula_sources: HashMap<Address, String>,
+    progress: AsyncProgress,
+) -> AsyncResult {
+    if progress.cancel.load(Ordering::Relaxed) {
+        return AsyncResult::Cancelled {
+            engine: Some(engine),
+        };
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    if let Err(e) = engine.save_xlsx(&path) {
+        return AsyncResult::FileSave {
+            engine,
+            path,
+            result: Err(e.to_string()),
+        };
+    }
+    let _ = l123_io::formula_sources::write_to_xlsx(&path, &formula_sources);
+    AsyncResult::FileSave {
+        engine,
+        path,
+        result: Ok(()),
+    }
+}
+
+/// §4.7 worker — `/File Import {Numbers,Text}`. The engine travels
+/// with the op so set_user_input on N rows runs off-thread. With
+/// `numeric_split = true`, each line is CSV-split and numeric
+/// fields become numbers; with `false`, each line becomes one
+/// apostrophe-prefixed label down a single column (matching the
+/// existing sync `/FIT` behavior, which doesn't split on commas).
+fn worker_file_import(
+    mut engine: IronCalcEngine,
+    path: PathBuf,
+    origin: Address,
+    progress: AsyncProgress,
+    numeric_split: bool,
+) -> AsyncResult {
+    let body = match read_file_with_progress(&path, &progress) {
+        Ok(b) => b,
+        Err(e) => {
+            return if e == "cancelled" {
+                AsyncResult::Cancelled {
+                    engine: Some(engine),
+                }
+            } else {
+                AsyncResult::Errored {
+                    engine: Some(engine),
+                    message: e,
+                }
+            }
+        }
+    };
+    let mut cells = Vec::new();
+    if numeric_split {
+        let rows = l123_io::csv::parse(&body);
+        let total_rows = rows.len() as u64;
+        progress.done.store(0, Ordering::Relaxed);
+        progress.total.store(total_rows.max(1), Ordering::Relaxed);
+        for (dr, row) in rows.iter().enumerate() {
+            if progress.cancel.load(Ordering::Relaxed) {
+                return AsyncResult::Cancelled {
+                    engine: Some(engine),
+                };
+            }
+            for (dc, field) in row.iter().enumerate() {
+                if field.is_empty() {
+                    continue;
+                }
+                let addr =
+                    Address::new(origin.sheet, origin.col + dc as u16, origin.row + dr as u32);
+                let (contents, engine_input) = csv_field_to_cell(field);
+                let _ = engine.set_user_input(addr, &engine_input);
+                cells.push((addr, contents));
+            }
+            progress.done.store((dr as u64) + 1, Ordering::Relaxed);
+        }
+    } else {
+        let lines: Vec<&str> = body.lines().collect();
+        let total_rows = lines.len() as u64;
+        progress.done.store(0, Ordering::Relaxed);
+        progress.total.store(total_rows.max(1), Ordering::Relaxed);
+        for (dr, line) in lines.iter().enumerate() {
+            if progress.cancel.load(Ordering::Relaxed) {
+                return AsyncResult::Cancelled {
+                    engine: Some(engine),
+                };
+            }
+            if !line.is_empty() {
+                let addr = Address::new(origin.sheet, origin.col, origin.row + dr as u32);
+                let engine_input = format!("'{line}");
+                let _ = engine.set_user_input(addr, &engine_input);
+                cells.push((
+                    addr,
+                    CellContents::Label {
+                        prefix: LabelPrefix::Apostrophe,
+                        text: (*line).to_string(),
+                    },
+                ));
+            }
+            progress.done.store((dr as u64) + 1, Ordering::Relaxed);
+        }
+    }
+    engine.recalc();
+    AsyncResult::FileImport { engine, cells }
+}
+
+/// §4.7 worker — F9 recalc on a workbook above `RECALC_WAIT_CELL_THRESHOLD`.
+/// IronCalc's `recalc` is opaque so progress stays indeterminate
+/// (renderer falls back to the verb-only line). Cancel is honored
+/// before the call but not during.
+fn worker_recalc(mut engine: IronCalcEngine, progress: AsyncProgress) -> AsyncResult {
+    if progress.cancel.load(Ordering::Relaxed) {
+        return AsyncResult::Cancelled {
+            engine: Some(engine),
+        };
+    }
+    engine.recalc();
+    AsyncResult::Recalc { engine }
+}
+
 fn is_iterm2_compatible_env(term_program: Option<&str>, lc_terminal: Option<&str>) -> bool {
     const HINTS: &[&str] = &[
         "iTerm",
@@ -12195,6 +16145,8 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        // Drain the §4.7 async save the prompt commit just queued.
+        app.test_resume_async_op();
     }
 
     /// End-to-end: /FS <path><Enter> writes an xlsx file at <path> that
@@ -12244,6 +16196,8 @@ mod tests {
 
         // Press B — Backup.
         app.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE));
+        // Backup queues an async save; drain it before checking disk.
+        app.test_resume_async_op();
         assert_eq!(app.mode, Mode::Ready);
         let bak = target.with_extension("BAK");
         assert!(bak.exists(), "expected {bak:?} after Backup");
@@ -12645,6 +16599,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.test_resume_async_op();
 
         assert_eq!(app.mode, Mode::Ready);
         match app.wb().cells.get(&Address::new(SheetId::A, 0, 0)).unwrap() {
@@ -12689,6 +16644,7 @@ mod tests {
             app2.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app2.test_resume_async_op();
 
         assert_eq!(app2.mode, Mode::Ready);
         let stored =
@@ -12729,6 +16685,7 @@ mod tests {
             app2.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app2.test_resume_async_op();
 
         assert!(!app2.is_dirty(), "successful /FR should clear dirty bit");
 
@@ -13132,6 +17089,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.test_resume_async_op();
         assert!(!app.is_dirty(), "successful /FS should clear the dirty bit");
 
         let _ = std::fs::remove_file(&target);
@@ -14567,7 +18525,7 @@ mod tests {
 
         let buf = app.render_to_buffer(80, 25);
         let neighbor = Address::new(SheetId::A, 1, 2); // B3
-        // First two B3 columns hold the spilled "ld" tail — underlined.
+                                                       // First two B3 columns hold the spilled "ld" tail — underlined.
         let l = buf_cell_at(&app, &buf, neighbor, 0);
         assert_eq!(l.symbol(), "l");
         assert!(l.style().add_modifier.contains(Modifier::UNDERLINED));
@@ -14622,9 +18580,9 @@ mod tests {
 
         let buf = app.render_to_buffer(120, 25);
         let neighbor = Address::new(SheetId::A, 1, 2); // B3
-        // First column of B3 is the boundary space — it's the
-        // internal " " of "...1991: Sloane..." and must stay
-        // underlined for the run to read continuously.
+                                                       // First column of B3 is the boundary space — it's the
+                                                       // internal " " of "...1991: Sloane..." and must stay
+                                                       // underlined for the run to read continuously.
         let boundary = buf_cell_at(&app, &buf, neighbor, 0);
         assert_eq!(boundary.symbol(), " ");
         assert!(

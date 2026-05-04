@@ -77,6 +77,12 @@ fn run_transcript(path: &Path) {
             continue;
         }
         let (directive, rest) = split_directive(line);
+        // §4.7 — drain any queued async op before the next directive
+        // runs, blocking the harness until the worker completes so
+        // sequential KEY-then-ASSERT_CELL flows see the post-op
+        // state. Gated by `block_next_async_op` so transcripts that
+        // assert mid-flight WAIT state stay deterministic.
+        app.drain_async_op_blocking();
         match directive {
             // ---- keystrokes ----
             "KEY" => press_char(&mut app, rest, line_no, path),
@@ -117,6 +123,42 @@ fn run_transcript(path: &Path) {
             "ALT_F" => {
                 let n: u8 = rest.parse().expect("ALT_F directive needs number");
                 app.handle_key(KeyEvent::new(KeyCode::F(n), KeyModifiers::ALT));
+            }
+            // SPEC §7: Ctrl-Break is the canonical abort key. Crossterm
+            // models the Pause/Break key as KeyCode::Pause; the CONTROL
+            // modifier disambiguates Break from a plain Pause.
+            "CTRL_BREAK" => {
+                app.handle_key(KeyEvent::new(KeyCode::Pause, KeyModifiers::CONTROL));
+            }
+            // §4.7 test hooks. The next async file op the App spawns
+            // will park itself until RESUME_OP fires, letting the
+            // transcript observe mid-flight WAIT state. No-op outside
+            // tests; production ops drain on their own schedule.
+            "BLOCK_NEXT_OP" => app.test_block_next_async_op(),
+            "RESUME_OP" => app.test_resume_async_op(),
+            // §4.7 — lower (or raise) the F9-recalc cell-count
+            // threshold. Lets a small transcript exercise the
+            // recalc-on-50k-cells WAIT path without actually
+            // populating 50k cells.
+            "RECALC_WAIT_THRESHOLD" => {
+                let n: usize = rest.parse().expect("RECALC_WAIT_THRESHOLD needs number");
+                app.test_set_recalc_wait_threshold(n);
+            }
+            // §4.7 — write synthetic done/total progress numbers
+            // onto the currently-pending async op so transcripts
+            // can assert the `[████░░] N%` bar shape without
+            // timing the worker. Format: "SEED_PROGRESS <done> <total>".
+            "SEED_PROGRESS" => {
+                let mut parts = rest.split_whitespace();
+                let done: u64 = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .expect("SEED_PROGRESS needs <done>");
+                let total: u64 = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .expect("SEED_PROGRESS needs <total>");
+                app.test_seed_async_progress(done, total);
             }
             "MACRO" => app.run_macro_text(rest),
 
@@ -490,6 +532,15 @@ fn run_transcript(path: &Path) {
             "RM_FILE" => {
                 let _ = std::fs::remove_file(rest);
             }
+            // Drop the current `App` and rebuild from `App::new()` to
+            // simulate a process quit + relaunch. Required for any
+            // claim that exercises only-on-load behavior (autoexec,
+            // named-range repopulation) — otherwise stale UI maps from
+            // the same session let the test pass without exercising
+            // the load path.
+            "RESET_APP" => {
+                app = App::new();
+            }
             // "COPY_FILE <src>  <dst>" — copy a binary fixture into the
             // transcript sandbox. Two args separated by ≥2 spaces or a
             // tab so paths with single spaces still parse.
@@ -676,6 +727,15 @@ fn run_transcript(path: &Path) {
                 assert!(
                     !exists,
                     "{}:{line_no}: file {fpath:?} unexpectedly exists",
+                    path.display()
+                );
+            }
+            "ASSERT_FILE_EXISTS" => {
+                let fpath = rest.trim();
+                let exists = std::fs::metadata(fpath).is_ok();
+                assert!(
+                    exists,
+                    "{}:{line_no}: file {fpath:?} expected to exist",
                     path.display()
                 );
             }
@@ -881,6 +941,18 @@ transcripts! {
     m3_f3_names_in_goto         => "m3_f3_names_in_goto.tsv",
     m3_f3_names_in_name_delete  => "m3_f3_names_in_name_delete.tsv",
     m3_f3_names_empty           => "m3_f3_names_empty.tsv",
+    m3_range_name_reset         => "m3_range_name_reset.tsv",
+    m3_range_name_labels        => "m3_range_name_labels.tsv",
+    m3_range_name_table         => "m3_range_name_table.tsv",
+    m3_range_name_undefine      => "m3_range_name_undefine.tsv",
+    m3_range_name_note          => "m3_range_name_note.tsv",
+    m3_range_prot               => "m3_range_prot.tsv",
+    m3_range_input              => "m3_range_input.tsv",
+    m3_range_value              => "m3_range_value.tsv",
+    m3_range_trans              => "m3_range_trans.tsv",
+    m3_range_justify            => "m3_range_justify.tsv",
+    m3_range_format_hidden      => "m3_range_format_hidden.tsv",
+    m3_range_format_time        => "m3_range_format_time.tsv",
     m3_beep_edge       => "M3_beep_edge.tsv",
     m4_file_save       => "M4_file_save.tsv",
     m4_file_save_replace => "M4_file_save_replace.tsv",
@@ -898,6 +970,13 @@ transcripts! {
     m4_file_list_active => "M4_file_list_active.tsv",
     m4_file_list_other => "M4_file_list_other.tsv",
     m4_file_list_worksheet => "M4_file_list_worksheet.tsv",
+    m4_wait_progress       => "M4_wait_progress.tsv",
+    m4_wait_ctrl_break     => "M4_wait_ctrl_break.tsv",
+    m4_wait_save           => "M4_wait_save.tsv",
+    m4_wait_import_numbers => "M4_wait_import_numbers.tsv",
+    m4_wait_import_text    => "M4_wait_import_text.tsv",
+    m4_wait_recalc         => "M4_wait_recalc.tsv",
+    m4_wait_progress_bar   => "M4_wait_progress_bar.tsv",
     m5_insert_sheet    => "M5_insert_sheet.tsv",
     m5_delete_sheet    => "M5_delete_sheet.tsv",
     m5_delete_file     => "M5_delete_file.tsv",
@@ -991,11 +1070,14 @@ transcripts! {
     t05_tutorial_graph_setup_view_save => "T05_tutorial_graph_setup_view_save.tsv",
     t06_tutorial_multiple_sheets_group_and_3d => "T06_tutorial_multiple_sheets_group_and_3d.tsv",
     t07_tutorial_file_retrieve_and_open => "T07_tutorial_file_retrieve_and_open.tsv",
+    t08_tutorial_macros               => "T08_tutorial_macros.tsv",
+    t09_tutorial_learn_record         => "T09_tutorial_learn_record.tsv",
     m9_macro_basic_keystrokes => "M9_macro_basic_keystrokes.tsv",
     m9_macro_special_keys     => "M9_macro_special_keys.tsv",
     m9_macro_alt_letter       => "M9_macro_alt_letter.tsv",
     m9_macro_alt_f3_run       => "M9_macro_alt_f3_run.tsv",
     m9_macro_autoexec         => "M9_macro_autoexec.tsv",
+    m9_macro_autoexec_restart => "M9_macro_autoexec_restart.tsv",
     m9_macro_branch           => "M9_macro_branch.tsv",
     m9_macro_quit             => "M9_macro_quit.tsv",
     m9_macro_subroutine       => "M9_macro_subroutine.tsv",
@@ -1009,6 +1091,17 @@ transcripts! {
     m9_macro_x_commands       => "M9_macro_x_commands.tsv",
     m9_learn_record           => "M9_learn_record.tsv",
     m9_macro_step             => "M9_macro_step.tsv",
+    m8_data_fill              => "M8_data_fill.tsv",
+    m8_data_sort              => "M8_data_sort.tsv",
+    m8_data_distribution      => "M8_data_distribution.tsv",
+    m8_data_regression        => "M8_data_regression.tsv",
+    m8_data_matrix            => "M8_data_matrix.tsv",
+    m8_data_parse             => "M8_data_parse.tsv",
+    m8_data_table_1           => "M8_data_table_1.tsv",
+    m8_data_table_2           => "M8_data_table_2.tsv",
+    m8_data_sort_extra        => "M8_data_sort_extra.tsv",
+    m8_data_parse_format_line => "M8_data_parse_format_line.tsv",
+    m8_data_query             => "M8_data_query.tsv",
     function_renames    => "function_renames.tsv",
     function_argfix     => "function_argfix.tsv",
     function_emulations => "function_emulations.tsv",

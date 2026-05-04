@@ -23,7 +23,7 @@ Shipped in `l123-parse` (covered by parse unit tests + acceptance
 transcripts under `tests/acceptance/function_*.tsv`):
 
 - **Renames**: `@AVG @COUNT @STD @STDS @VAR @VARS @ISSTRING @LENGTH
-  @REPEAT @COLS @CODE`, the database family
+  @REPEAT @COLS @CODE @D360 @ISRANGE`, the database family
   `@DAVG @DSTD @DSTDS @DVAR @DVARS`, and `@@`.
 - **Niladic-paren completion** for `@PI @NOW @TODAY @RAND @NA @TRUE
   @FALSE` (1-2-3 omits `()`; Excel requires it).
@@ -32,7 +32,32 @@ transcripts under `tests/acceptance/function_*.tsv`):
   (static for literal `decimals`, dynamic via `IF`/`REPT` otherwise).
 - **Emulations**: `@ERR` → `#VALUE!` literal, `@CTERM` and `@TERM` to
   log compositions, `@SUMPRODUCT` → `SUM` with array broadcast
-  (verified IronCalc 0.7.1 `SUM` accepts `(A1:A3)*(B1:B3)`).
+  (verified IronCalc 0.7.1 `SUM` accepts `(A1:A3)*(B1:B3)`),
+  `@REPLACE` → `LEFT(s,start) & new & MID(s,start+n+1,LEN(s))`
+  composition (IronCalc has `SUBSTITUTE` but not `REPLACE`),
+  `@DQUERY(...)` → `#NAME?` literal (out-of-scope external-DB hook —
+  any args swallowed; sidecar preserves the source form),
+  `@S(range)` → `IF(ISTEXT(<topleft>),<topleft>,"")` where `<topleft>`
+  is `INDEX(range,1,1)` for explicit ranges and the arg itself for
+  single-cell args (IronCalc's `INDEX` rejects non-range args).
+- **`@CELL` keyword dispatch**: keywords pass through unchanged for
+  the implemented set (`address`, `col`, `contents`, `row`, `type`)
+  and the IronCalc-stubbed set (`color`, `filename`, `format`,
+  `parentheses`, `prefix`, `protect`, `width` — render as `ERR` until
+  IronCalc lands real implementations). R3-only `"sheet"` rewrites
+  to `SHEET(ref)` (1-based sheet number). `"coord"` emits `#VALUE!`
+  because IronCalc 0.7.1 lacks `ADDRESS`.
+- **Passthroughs** that need no rename or rewrite (the `@`-strip is
+  enough): `@DGET` (R3 multi-input form deviates from Excel's
+  single-range `DGET` — same caveat as the rest of the database
+  family).
+- **`@CELLPOINTER` pre-pass**: `l123_parse::expand_cellpointer(lotus,
+  cursor)` rewrites `@CELLPOINTER(attr)` → `@CELL(attr, <cursor>)`
+  before the main translator runs. The cmd-layer formula commit path
+  (`l123-ui/src/app.rs`) supplies the cell address as cursor. Special
+  case: `@CELLPOINTER("sheet")` rewrites directly to `@SHEET()` (the
+  niladic form) so we don't generate a `SHEET(<self>)` self-reference
+  that IronCalc flags as `#CIRC!`.
 
 Deferred, with rationale:
 
@@ -41,27 +66,29 @@ Deferred, with rationale:
   an upstream PR or an engine-side shim.
 - `@CHAR` — IronCalc lacks both `CHAR` and `UNICHAR`. Engine shim
   required.
-- `@CELL` argument keyword map — keyword sets overlap heavily but
-  not entirely (e.g. `"sheetname"` is R3-only). Will be a small
-  per-keyword dispatch when prioritized.
-- `@CELLPOINTER` — needs cursor-context the engine doesn't carry;
-  belongs at the `l123-cmd` layer.
 - `@COORD` — would need `ADDRESS`, which IronCalc 0.7.1 lacks.
-- `@VDB @S @DQUERY @ISRANGE` — post-MVP niche; no clean
-  composition.
+- `@VDB` — IronCalc 0.7.1 lacks `VDB`. The Excel formula is identical
+  to 1-2-3's; landing `VDB` upstream in IronCalc is the natural fix.
+  Until then, the call passes through and IronCalc returns `#NAME?`.
 - `@N` argument-shape rewrite — IronCalc's `N` accepts ranges and
   silently picks the first cell, matching 1-2-3 behavior closely
   enough that the rewrite is a no-op in practice. Revisit if a
   divergence shows up in a transcript.
 
-Engine-adapter gap surfaced during PR3: IronCalc 0.7.1's `CellValue`
-enum has no `Error` variant — errors come back as
-`CellValue::String("#VALUE!")`. The current `IronCalcEngine` adapter
-maps that to `Value::Text("#VALUE!")` instead of
-`Value::Error(ErrKind::Value)`. As a result the cell renders the
-literal `#VALUE!` text instead of the Lotus-style `ERR` tag. This
-predates the function work; tracked as a follow-up on the engine
-crate, not a function-translation bug.
+Boolean-rendering note: `@ISERR @ISNA @ISNUMBER @ISSTRING @ISRANGE
+@TRUE @FALSE` all return Excel booleans which the renderer currently
+paints as `TRUE`/`FALSE`. Authentic 1-2-3 displays booleans as `1`/`0`.
+Cleanup is project-wide (a `cell_render.rs` change), not per-function.
+
+Engine-adapter error mapping (resolved): IronCalc 0.7.1's `CellValue`
+enum still has no `Error` variant — errors come back as
+`CellValue::String("#VALUE!")`, `"#DIV/0!"`, etc. The
+`IronCalcEngine::get_cell` adapter now inverts the six standard Excel
+error codes (`#VALUE!`, `#DIV/0!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A`)
+to `Value::Error(ErrKind::*)`, gated on `formula.is_some()` so that
+user-typed labels like `'#VALUE!` still pass through as text. As a
+result the renderer paints the Lotus-style `ERR`/`NA` tag for
+formula-derived errors.
 
 ## Reverse translation (engine → 1-2-3 source form)
 
@@ -204,12 +231,18 @@ Limitations:
 | `@STRING`     | `TEXT`   | rename  | 1-2-3 `@STRING(n, decimals)` → `TEXT(n, "0.000…")` — must build the Excel format string from the decimal count. |
 | `@VALUE`      | `VALUE`  | 1:1     |       |
 | `@CHAR`       | —        | emulate | IronCalc 0.7.1 lacks `CHAR`/`UNICHAR`. Shim required. |
-| `@CODE`       | —        | emulate | IronCalc has `UNICODE` (returns codepoint of first char) — close, but `@CODE` is LICS in R3 and ASCII elsewhere; pick one. |
+| `@CODE`       | `UNICODE` | rename | 1-2-3 `@CODE` is LICS in R3 and ASCII elsewhere; IronCalc only ships `UNICODE`, which agrees for ASCII input. Revisit if a transcript surfaces a divergence. |
+| `@REPLACE`    | —        | emulate | IronCalc 0.7.1 has `SUBSTITUTE` (substring-match) but not `REPLACE` (fixed-position). Composed as `LEFT(s,p) & new & MID(s,p+n+1,LEN(s))` with 0-based `p`. |
 
-### Date/Time — all 1:1
+### Date/Time
 
 `@DATE @DATEVALUE @DAY @MONTH @YEAR @NOW @TODAY @TIME @TIMEVALUE
-@HOUR @MINUTE @SECOND` all map to identically named IronCalc functions.
+@HOUR @MINUTE @SECOND` all map to identically named IronCalc functions
+(1:1).
+
+| @-name   | IronCalc   | Status  | Notes |
+|----------|------------|---------|-------|
+| `@D360`  | `DAYS360`  | rename  | Day count between two dates on a 360-day-year basis (12 × 30-day months). |
 
 Caveat: 1-2-3 epoch is **1900-01-01 = 1**; Excel epoch is the same but
 treats 1900 as a leap year (the legacy `Feb 29 1900` bug). IronCalc
@@ -242,8 +275,8 @@ for numbers) against Excel's `range_lookup` arg in transcripts.
 
 | @-name         | IronCalc   | Status  | Notes |
 |----------------|------------|---------|-------|
-| `@CELL`        | `CELL`     | arg-fix | Argument keywords differ (`"contents"` vs `"value"`, etc.). Build a small dispatch in the parser. |
-| `@CELLPOINTER` | —          | emulate | Same args as `@CELL` but acts on the current cursor — needs UI-layer context the engine doesn't have. Resolve at the `l123-cmd` layer, not in the parser. |
+| `@CELL`        | `CELL`     | arg-fix | Most keywords share the same name as Excel and pass through (`address`, `col`, `contents`, `row`, `type`, plus the IronCalc-stubbed `color`/`filename`/`format`/`parentheses`/`prefix`/`protect`/`width`). R3-only `"sheet"` rewrites to `SHEET(ref)`; `"coord"` emits `#VALUE!` (IronCalc lacks `ADDRESS`). Non-literal keyword args pass through verbatim. |
+| `@CELLPOINTER` | —          | pre-pass | `expand_cellpointer(lotus, cursor)` rewrites `@CELLPOINTER(attr)` → `@CELL(attr, <cursor>)` before the main translator runs. The cmd-layer formula commit path supplies the cursor. `@CELLPOINTER("sheet")` is special-cased to `@SHEET()` (niladic) to avoid a `SHEET(<self>)` self-reference that IronCalc would flag as `#CIRC!`. |
 | `@@`           | `INDIRECT` | rename  | The translator must recognize `@@(ref)` as a function call, not strip both `@`s. |
 | `@ROWS`        | `ROWS`     | 1:1     |       |
 | `@COLS`        | `COLUMNS`  | rename  |       |
@@ -259,6 +292,7 @@ for numbers) against Excel's `range_lookup` arg in transcripts.
 | `@DSUM`       | `DSUM`        | 1:1     |       |
 | `@DCOUNT`     | `DCOUNT`      | 1:1     |       |
 | `@DAVG`       | `DAVERAGE`    | rename  |       |
+| `@DGET`       | `DGET`        | 1:1     | Verified IronCalc 0.7.1 ships `DGET`. R3's multi-input form `@DGET(input1,...,inputn,field,criteria)` follows the same divergence as the rest of the database family — single-input usage matches Excel. |
 | `@DMAX`       | `DMAX`        | 1:1     |       |
 | `@DMIN`       | `DMIN`        | 1:1     |       |
 | `@DSTD`       | `DSTDEVP`     | rename  | Population. |
@@ -266,12 +300,12 @@ for numbers) against Excel's `range_lookup` arg in transcripts.
 | `@DVAR`       | `DVARP`       | rename  | Population. |
 | `@DVARS`      | `DVAR`        | rename  | Sample. |
 | `@SUMPRODUCT` | —             | emulate | Not in IronCalc 0.7.1. |
-| `@VDB`        | —             | emulate | Not in IronCalc. |
+| `@VDB`        | —             | deferred | IronCalc 0.7.1 lacks `VDB`. Algorithm matches Excel's `VDB` exactly — landing it upstream in IronCalc is the natural fix; until then the bare name passes through and IronCalc returns `#NAME?`. |
 | `@INFO`       | `INFO`        | 1:1     | Only a subset of `info_type` keywords are implemented in IronCalc — verify each. |
-| `@N`          | `N`           | arg-fix | 1-2-3 `@N(range)` returns the number in the **top-left cell** of the range; Excel `N(value)` coerces a single value. Wrap arg with `INDEX(.., 1, 1)` if it's a range. |
-| `@S`          | —             | emulate | String form of `@N`; same top-left semantics. No Excel equivalent. |
-| `@DQUERY`     | —             | emulate | External-DB hook; out of scope for L123. Emit `#NAME?`. |
-| `@ISRANGE`    | —             | emulate | `ISREF` is close but checks for any reference, not range-shape specifically. |
+| `@N`          | `N`           | 1:1\*   | \*Doc-bug deferred: 1-2-3 `@N(range)` returns the number in the **top-left cell** of the range; Excel `N(value)` coerces a single value. In practice IronCalc's `N` accepts a range and silently picks the first cell, so the no-op translation matches 1-2-3 closely. Revisit (rewrite to `INDEX(.., 1, 1)`) if a transcript surfaces a divergence. |
+| `@S`          | —             | emulate | `IF(ISTEXT(<topleft>),<topleft>,"")` where `<topleft>` is `INDEX(range,1,1)` for ranges and the arg itself for single cells (IronCalc's `INDEX` rejects non-range args). |
+| `@DQUERY`     | —             | emulate | External-DB hook; out of scope for L123. Rewrites to `#NAME?` literal regardless of args. Sidecar preserves the original Lotus form for round-trip. |
+| `@ISRANGE`    | `ISREF`       | rename  | 1-2-3 `@ISRANGE` checks "is this a defined range or valid range address?"; Excel's `ISREF` is broader (any reference). Agree on the cases users actually write; accept the small divergence. |
 
 ---
 
@@ -291,8 +325,13 @@ These need acceptance transcripts before claiming parity:
 4. **`@STRING` format** — `@STRING(1234.5, 2)` → `"1234.50"` in 1-2-3
    (uses International punct). Confirm Excel `TEXT(n, "0.00")` produces
    identical output under each Punctuation A-H setting.
-5. **`@CELL` keyword set** — enumerate which 1-2-3 keywords map to which
-   Excel ones; document the gaps as `#VALUE!` for now.
+5. **`@CELL` keyword set** (resolved) — surveyed against IronCalc
+   0.7.1's `fn_cell` (`information.rs:378`). Most 1-2-3 keywords share
+   their name with Excel and pass through. R3-only `"sheet"` rewrites
+   to `SHEET(ref)`; `"coord"` emits `#VALUE!` until IronCalc gains
+   `ADDRESS`. The IronCalc-stubbed keywords (`color`, `filename`,
+   `format`, `parentheses`, `prefix`, `protect`, `width`) render as
+   `ERR` from the engine side — adequate until each is implemented.
 
 ---
 
