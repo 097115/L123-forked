@@ -106,11 +106,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         GraphType::Pie => render_pie(vals, inner, buf),
         GraphType::XY => render_xy(vals, inner, buf),
         GraphType::Mixed => render_mixed(vals, inner, buf),
-        other => write_centered(
-            inner,
-            buf,
-            &format!("{other:?} graphs render in a later slice; press Esc to return."),
-        ),
+        GraphType::HLCO => render_hlco(vals, inner, buf),
     }
 }
 
@@ -873,6 +869,114 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// HLCO (High-Low-Close-Open) chart, terminal flavor. Each x
+/// position renders a vertical `│` line spanning B[i] (low) to
+/// A[i] (high), with `─` ticks pointing right at C[i] (close) and
+/// left at D[i] (open). Series mapping matches the raster
+/// `draw_hlco` convention and Reference p. 2-156.
+///
+/// All four series share a common Y extent computed across whatever
+/// series are populated and finite — different from the Bar/Line
+/// renderers which use the A series' own extent. Falls back to a
+/// centered hint when A (high) is unset or no series has finite
+/// values.
+fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    let Some(high) = vals.data[0].as_deref() else {
+        write_centered(area, buf, "HLCO needs series A (high).");
+        return;
+    };
+    let low = vals.data[1].as_deref().unwrap_or(&[]);
+    let close = vals.data[2].as_deref().unwrap_or(&[]);
+    let open = vals.data[3].as_deref().unwrap_or(&[]);
+    let n = high.len();
+    if n == 0 {
+        write_centered(area, buf, "HLCO needs series A (high).");
+        return;
+    }
+    let plot_top = area.top();
+    let plot_bottom = area.bottom().saturating_sub(1);
+    let plot_height = plot_bottom.saturating_sub(plot_top);
+    if plot_height < 2 || area.width < 2 {
+        return;
+    }
+
+    let mut y_lo = f64::INFINITY;
+    let mut y_hi = f64::NEG_INFINITY;
+    for s in [high, low, close, open] {
+        for &v in s {
+            if v.is_finite() {
+                y_lo = y_lo.min(v);
+                y_hi = y_hi.max(v);
+            }
+        }
+    }
+    if !y_lo.is_finite() || !y_hi.is_finite() {
+        write_centered(area, buf, "HLCO has no numeric values.");
+        return;
+    }
+    let span = if (y_hi - y_lo).abs() < f64::EPSILON {
+        1.0
+    } else {
+        y_hi - y_lo
+    };
+    let denom = (n.saturating_sub(1)).max(1) as f64;
+    let bar_style = Style::default().fg(Color::Gray);
+    let close_style = Style::default().fg(Color::Green);
+    let open_style = Style::default().fg(Color::Red);
+
+    let to_y = |v: f64| -> u16 {
+        let frac = (v - y_lo) / span;
+        let from_bottom = (frac * (plot_height as f64 - 1.0)).round() as u16;
+        plot_bottom.saturating_sub(1 + from_bottom)
+    };
+    for (i, &h) in high.iter().enumerate().take(n) {
+        let l = low.get(i).copied().unwrap_or(f64::NAN);
+        if !h.is_finite() || !l.is_finite() {
+            continue;
+        }
+        let frac_x = if n == 1 { 0.5 } else { i as f64 / denom };
+        let bx = area.left() + (frac_x * (area.width as f64 - 1.0)).round() as u16;
+        if bx >= area.right() {
+            continue;
+        }
+        let by_high = to_y(h.max(l));
+        let by_low = to_y(h.min(l));
+        for y in by_high..=by_low {
+            if y < area.top() || y >= area.bottom() {
+                continue;
+            }
+            let cell = &mut buf[(bx, y)];
+            cell.set_symbol("│");
+            cell.set_style(bar_style);
+        }
+        let c = close.get(i).copied().unwrap_or(f64::NAN);
+        if c.is_finite() {
+            let by = to_y(c);
+            let cx = bx.saturating_add(1);
+            if cx < area.right() && by >= area.top() && by < area.bottom() {
+                let cell = &mut buf[(cx, by)];
+                cell.set_symbol("─");
+                cell.set_style(close_style);
+            }
+        }
+        let o = open.get(i).copied().unwrap_or(f64::NAN);
+        if o.is_finite() && bx > area.left() {
+            let by = to_y(o);
+            let ox = bx - 1;
+            if by >= area.top() && by < area.bottom() {
+                let cell = &mut buf[(ox, by)];
+                cell.set_symbol("─");
+                cell.set_style(open_style);
+            }
+        }
+    }
+    for x in area.left()..area.right() {
+        let cell = &mut buf[(x, plot_bottom)];
+        cell.set_symbol("─");
+        cell.set_style(Style::default().fg(Color::Gray));
+    }
+}
+
 /// Mixed graph, terminal flavor: A series renders as bars and B
 /// series renders as a dot-line over the same plot area, matching
 /// the raster `draw_mixed` convention. Each layer scales to its
@@ -1246,13 +1350,6 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_type_shows_placeholder() {
-        let buf = render_to(GraphType::HLCO, vec![1.0, 2.0, 3.0], 80, 10);
-        assert!(contains(&buf, "HLCO"));
-        assert!(contains(&buf, "later slice"));
-    }
-
-    #[test]
     fn tiny_area_is_safe() {
         let area = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(area);
@@ -1336,6 +1433,60 @@ mod tests {
         assert!(
             far > near * 3,
             "XY should cluster near-x dots and stretch far ones (near={near}, far={far})"
+        );
+    }
+
+    #[test]
+    fn hlco_draws_open_left_close_right_of_bar() {
+        // Single x-position so the bar's column is unambiguous.
+        // High=10, Low=2, Close=8, Open=4. Open tick should land
+        // one column LEFT of the bar's column; close one column RIGHT.
+        let area = Rect::new(0, 0, 30, 14);
+        let mut buf = Buffer::empty(area);
+        let vals = GraphValues {
+            x: None,
+            data: [
+                Some(vec![10.0]),
+                Some(vec![2.0]),
+                Some(vec![8.0]),
+                Some(vec![4.0]),
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let def = GraphDef {
+            graph_type: GraphType::HLCO,
+            ..Default::default()
+        };
+        render(&def, &vals, area, &mut buf);
+        // Find the bar column: an INTERIOR column with stacked │.
+        // The frame's left/right edges also contain │, so skip x=0
+        // and x=width-1 to isolate the data bar.
+        let bar_col = (1..buf.area.width - 1).find(|x| {
+            (0..buf.area.height)
+                .filter(|y| buf[(*x, *y)].symbol() == "│")
+                .count()
+                >= 2
+        });
+        let bar_col = bar_col.expect("expected an interior column with stacked │ glyphs for the H-L bar");
+        // A `─` should appear at the column immediately to the right
+        // (close) and immediately to the left (open) — distinct from
+        // the baseline row, where `─` runs across the whole width.
+        let baseline = area.bottom() - 2;
+        let has_tick_above_baseline = |x: u16| -> bool {
+            (0..baseline).any(|y| buf[(x, y)].symbol() == "─")
+        };
+        assert!(bar_col > 0, "bar column at left edge — no room for open tick");
+        assert!(
+            has_tick_above_baseline(bar_col + 1),
+            "expected close ─ tick at column {} (right of bar at {bar_col})",
+            bar_col + 1
+        );
+        assert!(
+            has_tick_above_baseline(bar_col - 1),
+            "expected open ─ tick at column {} (left of bar at {bar_col})",
+            bar_col - 1
         );
     }
 }
