@@ -1,0 +1,65 @@
+# /Graph F10 view — Y-Axis and 2Y-Axis titles render as vertical
+# text in the left and right margin columns.
+#
+# Slice F (y-axis titles) of GRAPH_PLAN.md. Y-Axis is the only
+# title slot that needs column-major text rendering: one character
+# per row, top-to-bottom, in a one-column-wide strip outside the
+# frame on the left. 2Y-Axis mirrors it on the right.
+# Reference p. 2-216, 0100-graph-options-titles.html.
+
+SIZE 80 30
+
+# Seed A1..A3 = 1..3 so a Bar chart has shape on screen.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+HOME
+
+# /GTB then /GA over A1..A3.
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+HOME
+
+# Set Y-Axis title.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY Y
+KEYS Dollars
+ENTER
+ASSERT_GRAPH_TITLE  Y       Dollars
+
+# Set 2Y-Axis title.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY 2
+KEYS Units
+ENTER
+ASSERT_GRAPH_TITLE  2Y      Units
+
+# F10 — graph view. The two titles render vertically in the left
+# (column 0) and right (column 79) margins. ASSERT_SCREEN_COL
+# checks that the joined column text contains the title substring.
+F 10
+ASSERT_MODE         GRAPH
+ASSERT_SCREEN_COL   0       Dollars
+ASSERT_SCREEN_COL   79      Units
+# Bar plot still renders.
+ASSERT_SCREEN       █
+
+ESC
+ASSERT_MODE         READY

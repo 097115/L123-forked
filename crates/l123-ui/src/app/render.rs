@@ -285,6 +285,17 @@ impl App {
         s.trim_end().to_string()
     }
 
+    /// Concatenate the symbols of one buffer column top-to-bottom.
+    /// Mirror of `line_text` for column-major content like vertical
+    /// Y-Axis titles.
+    pub fn column_text(buf: &Buffer, x: u16) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            s.push_str(buf[(x, y)].symbol());
+        }
+        s.trim().to_string()
+    }
+
     /// Find the buffer y coordinate for a given grid row, honoring
     /// frozen rows + the current row scroll.  Returns `None` when the
     /// row is outside the visible body region.

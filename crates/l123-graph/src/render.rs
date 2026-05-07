@@ -61,11 +61,15 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     let with_titles = reserve_title_rows(area, &def.options.titles, buf);
     let with_notes = reserve_note_row(with_titles, &def.options.titles, buf);
     let with_legend = reserve_legend_row(with_notes, &def.options.legend, buf);
-    let plot_area = if def.features.table {
+    let after_table = if def.features.table {
         reserve_value_table_rows(with_legend, vals, buf)
     } else {
         with_legend
     };
+    // Y-Axis / 2Y-Axis titles sit OUTSIDE the frame, in one-column
+    // vertical strips on the left and right of the plot. Carve those
+    // before the frame so the frame stays a clean rectangle.
+    let plot_area = reserve_axis_title_columns(after_table, &def.options.titles, buf);
     if plot_area.height < 3 {
         // No room left for a meaningful plot.
         return;
@@ -384,9 +388,57 @@ fn reserve_legend_row(area: Rect, legend: &[Option<String>; 6], buf: &mut Buffer
     Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
 
+/// Paint Y-Axis (left) and 2Y-Axis (right) titles as one-column-wide
+/// vertical text and return the area shrunk inward by one column on
+/// each side that carries a title. Each character of the title goes
+/// in its own row, top-to-bottom, vertically centered within the
+/// available column. Truncated when the title is longer than the
+/// column height. No-op when neither title is set.
+fn reserve_axis_title_columns(area: Rect, titles: &crate::Titles, buf: &mut Buffer) -> Rect {
+    let left = titles.y_axis.as_deref();
+    let right = titles.two_y_axis.as_deref();
+    if left.is_none() && right.is_none() {
+        return area;
+    }
+    if area.width < 4 {
+        return area;
+    }
+    let style = Style::default().fg(Color::White);
+    let mut x = area.left();
+    let mut width = area.width;
+    if let Some(text) = left {
+        write_centered_column(area, area.left(), buf, text, style);
+        x = x.saturating_add(1);
+        width = width.saturating_sub(1);
+    }
+    if let Some(text) = right {
+        let col = area.right().saturating_sub(1);
+        write_centered_column(area, col, buf, text, style);
+        width = width.saturating_sub(1);
+    }
+    Rect::new(x, area.y, width, area.height)
+}
+
+fn write_centered_column(area: Rect, x: u16, buf: &mut Buffer, msg: &str, style: Style) {
+    let chars: Vec<char> = msg.chars().collect();
+    let max_len = area.height as usize;
+    let take = chars.len().min(max_len);
+    let y0 = area.top() + ((area.height as usize - take) / 2) as u16;
+    for (i, ch) in chars.iter().take(take).enumerate() {
+        let y = y0 + i as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        let cell = &mut buf[(x, y)];
+        cell.set_symbol(&ch.to_string());
+        cell.set_style(style);
+    }
+}
+
 /// Paint First / Second / X-Axis titles into `area` and return the
-/// remaining rectangle the plot is allowed to occupy. Y-Axis,
-/// 2Y-Axis, Note, and Other-Note are deferred to a later slice.
+/// remaining rectangle the plot is allowed to occupy. Y-Axis and
+/// 2Y-Axis titles are handled separately by
+/// [`reserve_axis_title_columns`].
 fn reserve_title_rows(area: Rect, titles: &crate::Titles, buf: &mut Buffer) -> Rect {
     let mut top = area.top();
     let mut bottom = area.bottom();
