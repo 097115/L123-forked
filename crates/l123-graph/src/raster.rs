@@ -637,6 +637,12 @@ where
         mesh.y_desc(t);
     }
     mesh.draw()?;
+    // Aggregate per-x line segments into three single-series
+    // pipelines so each contributes one legend entry. Legend names
+    // come from the matching A/B/C/D slot with sensible fallbacks.
+    let mut bar_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
+    let mut close_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
+    let mut open_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
     for (i, &h) in high.iter().enumerate().take(n) {
         let l = low.get(i).copied().unwrap_or(f64::NAN);
         let c = close.get(i).copied().unwrap_or(f64::NAN);
@@ -645,24 +651,58 @@ where
             continue;
         }
         let x = i as f64;
-        // Main vertical line from L to H.
-        chart.draw_series(std::iter::once(PathElement::new(
+        bar_segs.push(PathElement::new(
             vec![(x, l), (x, h)],
             BLACK.stroke_width(1),
-        )))?;
+        ));
         if c.is_finite() {
-            chart.draw_series(std::iter::once(PathElement::new(
+            close_segs.push(PathElement::new(
                 vec![(x, c), (x + 0.3, c)],
                 GREEN.stroke_width(2),
-            )))?;
+            ));
         }
         if o.is_finite() {
-            chart.draw_series(std::iter::once(PathElement::new(
+            open_segs.push(PathElement::new(
                 vec![(x - 0.3, o), (x, o)],
                 RED.stroke_width(2),
-            )))?;
+            ));
         }
     }
+    let high_label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "High-Low".into());
+    chart
+        .draw_series(bar_segs)?
+        .label(high_label)
+        .legend(|(x, y)| PathElement::new(vec![(x + 6, y - 5), (x + 6, y + 5)], BLACK.stroke_width(2)));
+    if !close_segs.is_empty() {
+        let close_label = def
+            .options
+            .legend
+            .get(2)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Close".into());
+        chart
+            .draw_series(close_segs)?
+            .label(close_label)
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 12, y)], GREEN.stroke_width(2)));
+    }
+    if !open_segs.is_empty() {
+        let open_label = def
+            .options
+            .legend
+            .get(3)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Open".into());
+        chart
+            .draw_series(open_segs)?
+            .label(open_label)
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 12, y)], RED.stroke_width(2)));
+    }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -1029,6 +1069,34 @@ mod tests {
             with_grid_lines > no_grid_lines,
             "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
         );
+    }
+
+    #[test]
+    fn svg_hlco_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::HLCO,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("HighA".into()),
+                    None,
+                    Some("CloseC".into()),
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![10.0, 11.0, 12.0]),
+            (1, vec![8.0, 9.0, 10.0]),
+            (2, vec![9.0, 10.5, 11.0]),
+            (3, vec![8.5, 10.0, 10.5]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("HighA"), "HLCO SVG missing High legend");
+        assert!(svg.contains("CloseC"), "HLCO SVG missing Close legend");
     }
 
     #[test]
