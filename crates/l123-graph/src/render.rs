@@ -64,6 +64,10 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         // No room left for a meaningful plot.
         return;
     }
+    // Grid is painted first so the per-type renderers overwrite it
+    // where their bars/dots fall. The dotted unicode glyphs sit
+    // beneath the data without competing for visual weight.
+    render_grid_lines(&def.options.grid, plot_area, buf);
     match def.graph_type {
         GraphType::Bar => render_bar(vals, plot_area, buf),
         GraphType::Line => render_line(vals, plot_area, buf),
@@ -72,6 +76,51 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
             buf,
             &format!("{other:?} graphs render in a later slice; press Esc to return."),
         ),
+    }
+}
+
+/// Draw light dotted grid lines into `area`, picking three evenly-
+/// spaced positions in each direction. The plot baseline (last row)
+/// is left untouched so the per-type renderers can still draw their
+/// own axis line over it. Glyph choices: `┄` (U+2504) for
+/// horizontal, `┊` (U+250A) for vertical — distinct from `─` and `│`
+/// so substring tests can tell grid from axis.
+fn render_grid_lines(grid: &crate::GridMask, area: Rect, buf: &mut Buffer) {
+    if !grid.horizontal && !grid.vertical {
+        return;
+    }
+    let style = Style::default().fg(Color::DarkGray);
+    let inner_height = area.height.saturating_sub(1); // skip baseline row
+    if grid.horizontal && inner_height >= 4 {
+        for n in 1..=3 {
+            let y = area.top() + (inner_height as u32 * n as u32 / 4) as u16;
+            if y >= area.bottom().saturating_sub(1) {
+                continue;
+            }
+            for x in area.left()..area.right() {
+                let cell = &mut buf[(x, y)];
+                cell.set_symbol("┄");
+                cell.set_style(style);
+            }
+        }
+    }
+    if grid.vertical && area.width >= 4 {
+        for n in 1..=3 {
+            let x = area.left() + (area.width as u32 * n as u32 / 4) as u16;
+            if x >= area.right() {
+                continue;
+            }
+            for y in area.top()..area.bottom().saturating_sub(1) {
+                let cell = &mut buf[(x, y)];
+                // Only paint where horizontal didn't already write a
+                // glyph, to avoid the visual cross at intersections.
+                let existing = cell.symbol();
+                if existing == " " {
+                    cell.set_symbol("┊");
+                    cell.set_style(style);
+                }
+            }
+        }
     }
 }
 

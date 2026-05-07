@@ -199,6 +199,15 @@ where
     let mut chart =
         builder.build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -266,6 +275,15 @@ where
     let mut chart =
         builder.build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -317,6 +335,15 @@ where
     }
     let mut chart = builder.build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -385,6 +412,15 @@ where
     let mut chart =
         builder.build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -520,6 +556,15 @@ where
     }
     let mut chart = builder.build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -584,6 +629,15 @@ where
     let mut chart =
         builder.build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
     if let Some(t) = def.options.titles.x_axis.as_deref() {
         mesh.x_desc(t);
     }
@@ -740,7 +794,7 @@ mod tests {
         let svg = render_svg(&def, &vals);
         assert!(svg.contains("<svg"));
         assert!(
-            svg.contains("<path") || svg.contains("<line"),
+            svg.contains("<path") || svg.contains("<line") || svg.contains("<polyline"),
             "no strokes in HLCO"
         );
     }
@@ -858,6 +912,41 @@ mod tests {
         let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0, 4.0]));
         assert!(svg.contains("Quarter"), "missing x-axis description in SVG");
         assert!(svg.contains("Dollars"), "missing y-axis description in SVG");
+    }
+
+    #[test]
+    fn svg_default_has_no_mesh_grid_in_plot_area() {
+        // plotters draws a mesh by default; we suppress it when the
+        // user has not set options.grid. The SVG still contains axis
+        // ticks (short tick marks), but full-length grid lines should
+        // be absent. We approximate by counting <line> path elements:
+        // a no-grid SVG has the axis frame, axis ticks, and a
+        // vertical/horizontal axis line, but no row of horizontal
+        // mesh lines spanning the plot.
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        let no_grid_lines = svg.match_indices("<line").count();
+        let with_grid = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                grid: crate::GridMask {
+                    horizontal: true,
+                    vertical: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg2 = render_svg(&with_grid, &a(vec![1.0, 2.0, 3.0]));
+        let with_grid_lines = svg2.match_indices("<line").count();
+        assert!(
+            with_grid_lines > no_grid_lines,
+            "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
+        );
     }
 
     #[test]
