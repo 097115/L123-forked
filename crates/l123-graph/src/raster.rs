@@ -291,18 +291,31 @@ where
         mesh.y_desc(t);
     }
     mesh.draw()?;
-    chart.draw_series(
-        Histogram::vertical(&chart)
-            .style(BLUE.filled())
-            .margin(6)
-            .data(a.iter().enumerate().filter_map(|(i, &v)| {
-                if v.is_finite() {
-                    Some((i as i32, v))
-                } else {
-                    None
-                }
-            })),
-    )?;
+    let bar_color = SERIES_PALETTE[0];
+    let label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "Series A".into());
+    chart
+        .draw_series(
+            Histogram::vertical(&chart)
+                .style(bar_color.filled())
+                .margin(6)
+                .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                    if v.is_finite() {
+                        Some((i as i32, v))
+                    } else {
+                        None
+                    }
+                })),
+        )?
+        .label(label)
+        .legend(move |(x, y)| {
+            Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+        });
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -984,6 +997,30 @@ mod tests {
         assert!(
             with_grid_lines > no_grid_lines,
             "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
+        );
+    }
+
+    #[test]
+    fn svg_bar_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Q1 Sales".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![10.0, 20.0, 30.0]));
+        assert!(
+            svg.contains("Q1 Sales"),
+            "bar SVG should embed the user-set legend text"
         );
     }
 
