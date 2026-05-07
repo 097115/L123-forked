@@ -76,10 +76,12 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     // beneath the data without competing for visual weight.
     render_grid_lines(&def.options.grid, inner, buf);
     match def.graph_type {
-        GraphType::Bar => match def.features.orientation {
-            crate::Orientation::Vertical => render_bar(vals, inner, buf),
-            crate::Orientation::Horizontal => render_bar_horizontal(vals, inner, buf),
+        GraphType::Bar => match (def.features.orientation, def.features.stacked) {
+            (crate::Orientation::Vertical, false) => render_bar(vals, inner, buf),
+            (crate::Orientation::Vertical, true) => render_bar_stacked(vals, inner, buf),
+            (crate::Orientation::Horizontal, _) => render_bar_horizontal(vals, inner, buf),
         },
+        GraphType::Stack => render_bar_stacked(vals, inner, buf),
         GraphType::Line => render_line(vals, inner, buf),
         other => write_centered(
             inner,
@@ -390,6 +392,103 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
                     cell.set_style(style);
                 }
             }
+        }
+    }
+    // Baseline row of `─`.
+    for x in area.left()..area.right() {
+        let cell = &mut buf[(x, plot_bottom)];
+        cell.set_symbol("─");
+        cell.set_style(Style::default().fg(Color::Gray));
+    }
+}
+
+/// Stacked vertical bar chart. Every populated A..F slot becomes a
+/// segment of one column at each X position; segments stack from the
+/// bottom up, A first, B above A, etc. Each series uses a distinct
+/// shading glyph so series identity reads visually in the unicode
+/// view: A=`█`, B=`▓`, C=`▒`, D=`░` (E/F cycle through the same
+/// four).
+///
+/// Used by both `Bar + features.stacked = true` and the dedicated
+/// `Stack` graph type. Whole-cell segments only — no half-row
+/// blending — because a single Buffer cell can carry only one glyph
+/// + style, and mixing two series across one cell can't be
+///   represented faithfully.
+fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
+
+    let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
+    if series.is_empty() {
+        write_centered(area, buf, "No A..F data to stack.");
+        return;
+    }
+    let plot_top = area.top();
+    let plot_bottom = area.bottom().saturating_sub(1);
+    let plot_height = plot_bottom.saturating_sub(plot_top);
+    if plot_height < 2 {
+        return;
+    }
+    let n = series.iter().map(|s| s.len()).max().unwrap_or(0);
+    if n == 0 {
+        return;
+    }
+    // For each X, sum positive finite values across series.
+    let mut totals = vec![0f64; n];
+    for s in &series {
+        for (i, &v) in s.iter().enumerate() {
+            if v.is_finite() && v > 0.0 && i < totals.len() {
+                totals[i] += v;
+            }
+        }
+    }
+    let max_total = totals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let max = if max_total <= 0.0 || !max_total.is_finite() {
+        1.0
+    } else {
+        max_total
+    };
+
+    let bar_count = n as u16;
+    let plot_width = area.width;
+    let step = (plot_width / bar_count).max(1);
+    let bar_width = step.saturating_sub(1).max(1);
+
+    let style = Style::default().fg(Color::Cyan);
+
+    for i in 0..n {
+        let x0 = area.left() + (i as u16) * step;
+        // Stack from the bottom up.
+        let mut row_offset: u16 = 0;
+        for (si, s) in series.iter().enumerate() {
+            let v = s.get(i).copied().unwrap_or(f64::NAN);
+            if !v.is_finite() || v <= 0.0 {
+                continue;
+            }
+            let segment_rows = ((v / max) * plot_height as f64).round() as u16;
+            if segment_rows == 0 {
+                continue;
+            }
+            let glyph = GLYPHS[si % GLYPHS.len()];
+            for r in 0..segment_rows {
+                let total_rows = row_offset + r;
+                if total_rows >= plot_height {
+                    break;
+                }
+                let y = plot_bottom.saturating_sub(1 + total_rows);
+                if y < plot_top {
+                    break;
+                }
+                for bx in 0..bar_width {
+                    let x = x0 + bx;
+                    if x >= area.right() {
+                        break;
+                    }
+                    let cell = &mut buf[(x, y)];
+                    cell.set_symbol(glyph);
+                    cell.set_style(style);
+                }
+            }
+            row_offset = row_offset.saturating_add(segment_rows);
         }
     }
     // Baseline row of `─`.
