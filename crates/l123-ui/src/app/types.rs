@@ -1785,6 +1785,11 @@ pub(super) enum PendingCommand {
     GraphDataLabels {
         slot: usize,
     },
+    /// POINT step of `/Graph Options Legend Range`: on commit, the
+    /// cell text of the range fills `current_graph.options.legend[0..6]`
+    /// in order. Empty cells become `None`; ranges longer than six
+    /// truncate; shorter ranges leave trailing slots untouched.
+    GraphLegendRange,
     /// POINT step of `/Graph Group`. On commit, the range is stashed
     /// on `App::pending_graph_group_range` and the orientation
     /// submenu (Columnwise|Rowwise) is rooted; the chosen leaf walks
@@ -1942,6 +1947,7 @@ impl PendingCommand {
             PendingCommand::RangeSearchRange { .. } => "Enter search range:",
             PendingCommand::GraphSeries { .. } => "Enter graph range:",
             PendingCommand::GraphDataLabels { .. } => "Enter data-label range:",
+            PendingCommand::GraphLegendRange => "Enter legend range:",
             PendingCommand::GraphGroup => "Enter graph group range:",
             PendingCommand::ColumnRangeSetWidth { .. } => "Enter range of columns to set:",
             PendingCommand::ColumnRangeResetWidth => "Enter range of columns to reset:",

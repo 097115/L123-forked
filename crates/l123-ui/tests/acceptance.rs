@@ -1271,6 +1271,7 @@ transcripts! {
     graph_options_format => "graph_options_format.tsv",
     graph_options_titles => "graph_options_titles.tsv",
     graph_options_legend => "graph_options_legend.tsv",
+    graph_options_legend_range => "graph_options_legend_range.tsv",
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",

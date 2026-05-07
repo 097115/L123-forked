@@ -1,0 +1,49 @@
+# /Graph Options Legend Range — populate the six legend slots from
+# the cell text of a worksheet range.
+#
+# Slice F (legend range) of GRAPH_PLAN.md. Until this slice the
+# Range leaf was a NotImplemented stub; the per-letter A..F leaves
+# took text prompts one at a time. After: a POINT prompt opens; on
+# commit the cells in the selected range fill legends[0..6] in
+# order. Cell text uses the same display contract as the pie wedge
+# labels (Text → as-is, Number → stringified, Empty/Error → empty).
+# Reference p. 2-200.
+
+SIZE 80 30
+
+# Seed A1..A4 = legend strings.
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+KEYS Q4
+DOWN
+HOME
+
+# Default: every legend unset.
+ASSERT_GRAPH_LEGEND  A  none
+ASSERT_GRAPH_LEGEND  B  none
+ASSERT_GRAPH_LEGEND  C  none
+ASSERT_GRAPH_LEGEND  D  none
+
+# /GOLR — Legend Range over A1..A4.
+KEY /
+KEY G
+KEY O
+KEY L
+KEY R
+DOWN
+DOWN
+DOWN
+ENTER
+
+# Legends A..D filled from the cells; E/F still unset.
+ASSERT_MODE          READY
+ASSERT_GRAPH_LEGEND  A  Q1
+ASSERT_GRAPH_LEGEND  B  Q2
+ASSERT_GRAPH_LEGEND  C  Q3
+ASSERT_GRAPH_LEGEND  D  Q4
+ASSERT_GRAPH_LEGEND  E  none
+ASSERT_GRAPH_LEGEND  F  none

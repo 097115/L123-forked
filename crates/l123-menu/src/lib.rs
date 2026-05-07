@@ -644,6 +644,9 @@ pub enum Action {
     GraphOptionsLegendD,
     GraphOptionsLegendE,
     GraphOptionsLegendF,
+    /// `/Graph Options Legend Range` — POINT prompt for a worksheet
+    /// range; cell text fills the six legend slots in order.
+    GraphOptionsLegendRange,
 
     // ---- /Graph Options Data-Labels (slice D Data-Labels portion) ---
     /// `/Graph Options Data-Labels A` — POINT prompt; commit stores
@@ -4526,7 +4529,7 @@ const GO_LEGEND_MENU: &[MenuItem] = &[
         name: "Range",
         help: "Read legends from a worksheet range",
         help_page: "0091-graph-options-legend.html",
-        body: MenuBody::NotImplemented("gol-range"),
+        body: MenuBody::Action(Action::GraphOptionsLegendRange),
     },
     MenuItem {
         letter: 'Q',

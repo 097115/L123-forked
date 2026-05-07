@@ -3517,6 +3517,7 @@ impl App {
             Action::GraphOptionsLegendD => self.start_graph_legend_prompt(3),
             Action::GraphOptionsLegendE => self.start_graph_legend_prompt(4),
             Action::GraphOptionsLegendF => self.start_graph_legend_prompt(5),
+            Action::GraphOptionsLegendRange => self.begin_point(PendingCommand::GraphLegendRange),
             Action::GraphOptionsDataLabelsA => self.begin_point(PendingCommand::GraphDataLabels { slot: 0 }),
             Action::GraphOptionsDataLabelsB => self.begin_point(PendingCommand::GraphDataLabels { slot: 1 }),
             Action::GraphOptionsDataLabelsC => self.begin_point(PendingCommand::GraphDataLabels { slot: 2 }),
@@ -5863,6 +5864,14 @@ impl App {
                     .get_mut(slot)
                 {
                     *s = Some(first);
+                }
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::GraphLegendRange => {
+                let labels = self.read_series_labels(first);
+                let slots = &mut self.wb_mut().current_graph.options.legend;
+                for (i, slot) in slots.iter_mut().enumerate() {
+                    *slot = labels.get(i).filter(|s| !s.is_empty()).cloned();
                 }
                 self.mode = Mode::Ready;
             }
