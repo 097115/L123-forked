@@ -78,10 +78,12 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     match def.graph_type {
         GraphType::Bar => match (def.features.orientation, def.features.stacked) {
             (crate::Orientation::Vertical, false) => render_bar(vals, inner, buf),
-            (crate::Orientation::Vertical, true) => render_bar_stacked(vals, inner, buf),
+            (crate::Orientation::Vertical, true) => {
+                render_bar_stacked(vals, inner, buf, def.features.percent)
+            }
             (crate::Orientation::Horizontal, _) => render_bar_horizontal(vals, inner, buf),
         },
-        GraphType::Stack => render_bar_stacked(vals, inner, buf),
+        GraphType::Stack => render_bar_stacked(vals, inner, buf, def.features.percent),
         GraphType::Line => render_line(vals, inner, buf),
         other => write_centered(
             inner,
@@ -414,7 +416,7 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 /// blending — because a single Buffer cell can carry only one glyph
 /// + style, and mixing two series across one cell can't be
 ///   represented faithfully.
-fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer, percent: bool) {
     const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
 
     let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
@@ -455,8 +457,21 @@ fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 
     let style = Style::default().fg(Color::Cyan);
 
-    for i in 0..n {
+    for (i, &col_total) in totals.iter().enumerate() {
         let x0 = area.left() + (i as u16) * step;
+        // Per-column denominator: in percent mode each column scales
+        // by its own total, so every column reaches plot_height; in
+        // absolute mode all columns share the global max so column
+        // magnitudes are comparable.
+        let denom = if percent {
+            if col_total > 0.0 {
+                col_total
+            } else {
+                continue;
+            }
+        } else {
+            max
+        };
         // Stack from the bottom up.
         let mut row_offset: u16 = 0;
         for (si, s) in series.iter().enumerate() {
@@ -464,7 +479,7 @@ fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
             if !v.is_finite() || v <= 0.0 {
                 continue;
             }
-            let segment_rows = ((v / max) * plot_height as f64).round() as u16;
+            let segment_rows = ((v / denom) * plot_height as f64).round() as u16;
             if segment_rows == 0 {
                 continue;
             }
@@ -667,6 +682,51 @@ mod tests {
         let buf = render_to(GraphType::Bar, vec![1.0, 2.0, 3.0], 40, 10);
         assert!(contains(&buf, "█"), "no █ in bar chart");
         assert!(contains(&buf, "─"), "no baseline");
+    }
+
+    #[test]
+    fn stacked_percent_normalizes_each_column_to_full_height() {
+        // A=[1,1], B=[1,2]. Totals=[2,3]. max=3.
+        // Without percent: column 0 reaches 2/3 of plot_height; only
+        // column 1 (full height) has any cell at the topmost plot row.
+        // With percent: both columns reach plot_height; both have
+        // cells at the topmost row.
+        let area = Rect::new(0, 0, 30, 12);
+        let mut vals = GraphValues::default();
+        vals.data[0] = Some(vec![1.0, 1.0]);
+        vals.data[1] = Some(vec![1.0, 2.0]);
+
+        let count_top_row = |percent: bool| -> usize {
+            let mut buf = Buffer::empty(area);
+            let def = GraphDef {
+                graph_type: GraphType::Bar,
+                features: GraphFeatures {
+                    stacked: true,
+                    percent,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            render(&def, &vals, area, &mut buf);
+            // After title rows (none) + legend (none) + frame (default
+            // all-on): inner area starts at y=1 inside the frame.
+            // Topmost plot row inside the frame.
+            let y = 1;
+            (0..area.width)
+                .filter(|x| {
+                    let s = buf[(*x, y)].symbol();
+                    s == "█" || s == "▓" || s == "▒" || s == "░"
+                })
+                .count()
+        };
+
+        let absolute = count_top_row(false);
+        let scaled = count_top_row(true);
+        assert!(
+            scaled > absolute,
+            "percent should fill more cells in the top row \
+             (absolute={absolute}, percent={scaled})"
+        );
     }
 
     #[test]
