@@ -82,7 +82,9 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     render_grid_lines(&def.options.grid, inner, buf);
     match def.graph_type {
         GraphType::Bar => match (def.features.orientation, def.features.stacked) {
-            (crate::Orientation::Vertical, false) => render_bar(vals, inner, buf),
+            (crate::Orientation::Vertical, false) => {
+                render_bar(vals, inner, buf, def.features.drop_shadow)
+            }
             (crate::Orientation::Vertical, true) => {
                 render_bar_stacked(vals, inner, buf, def.features.percent)
             }
@@ -409,7 +411,7 @@ fn write_centered(area: Rect, buf: &mut Buffer, msg: &str) {
 ///
 /// With only series A populated this collapses to the original
 /// single-series Bar layout: one wide bar per X, half-block top.
-fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer, drop_shadow: bool) {
     const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
 
     let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
@@ -490,6 +492,26 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
                         let cell = &mut buf[(x, y)];
                         cell.set_symbol(half);
                         cell.set_style(style);
+                    }
+                }
+            }
+            // Drop-shadow column immediately to the right of the bar
+            // for the bar's full height, plus one cell below at the
+            // shadow column. Inner-cluster bars get their shadow
+            // overdrawn by the next bar — that's the intended 3-D
+            // effect.
+            if drop_shadow {
+                let shadow_x = x_start + bar_width;
+                if shadow_x < area.right() {
+                    let shadow_style = Style::default().fg(Color::DarkGray);
+                    let bar_top = plot_bottom.saturating_sub(full_rows + u16::from(has_half));
+                    for y in bar_top..plot_bottom {
+                        if y < area.top() {
+                            continue;
+                        }
+                        let cell = &mut buf[(shadow_x, y)];
+                        cell.set_symbol("░");
+                        cell.set_style(shadow_style);
                     }
                 }
             }

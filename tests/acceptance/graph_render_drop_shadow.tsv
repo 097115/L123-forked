@@ -1,0 +1,54 @@
+# /Graph F10 view — Drop-shadow paints a trailing shade column.
+#
+# Slice F9a of GRAPH_PLAN.md. When features.drop_shadow = true,
+# every bar gets a one-column shadow strip immediately to its
+# right, painted with `░` (LIGHT SHADE) in DarkGray. In a
+# multi-series cluster only the rightmost bar's shadow stays
+# visible (inner shadows are overdrawn by the next bar, which is
+# the correct 3-D-stack effect).
+#
+# Reference p. 2-194: "Drop-Shadow Yes — Add a drop shadow."
+
+SIZE 80 30
+
+# Seed A1..A3 = 1, 2, 3.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+HOME
+ASSERT_POINTER     A:A1
+
+# /GTB then /GA → A1..A3.
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+HOME
+
+# Default: drop-shadow off → no `░` from a shadow.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  ░
+ESC
+
+# /GTFDY — Drop-Shadow Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY D
+KEY Y
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     ░
+ESC
+ASSERT_MODE       READY
