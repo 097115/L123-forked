@@ -441,10 +441,18 @@ where
         mesh.y_desc(t);
     }
     mesh.draw()?;
-    // Draw each layer as its own Histogram on top of the cumulative sums.
+    // Draw each layer as its own Histogram on top of the cumulative
+    // sums. Pair every populated series with its original A..F slot
+    // so the legend text and the stacking colour stay aligned.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
     let mut base: Vec<f64> = vec![0.0; n];
-    for (si, s) in series.iter().enumerate() {
-        let color = SERIES_PALETTE[si % SERIES_PALETTE.len()];
+    for (layer_i, (slot, s)) in series_with_slot.iter().enumerate() {
+        let color = SERIES_PALETTE[layer_i % SERIES_PALETTE.len()];
         let points: Vec<(i32, f64)> = (0..n as i32)
             .filter_map(|i| {
                 let idx = i as usize;
@@ -457,13 +465,25 @@ where
                 Some((i, top))
             })
             .collect();
-        chart.draw_series(
-            Histogram::vertical(&chart)
-                .style(color.filled())
-                .margin(6)
-                .data(points),
-        )?;
+        let label = def
+            .options
+            .legend
+            .get(*slot)
+            .and_then(|opt| opt.clone())
+            .unwrap_or_else(|| format!("Series {}", (b'A' + *slot as u8) as char));
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(color.filled())
+                    .margin(6)
+                    .data(points),
+            )?
+            .label(label)
+            .legend(move |(x, y)| {
+                Rectangle::new([(x, y - 5), (x + 12, y + 5)], color.filled())
+            });
     }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -997,6 +1017,36 @@ mod tests {
         assert!(
             with_grid_lines > no_grid_lines,
             "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
+        );
+    }
+
+    #[test]
+    fn svg_stack_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Stack,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("A1".into()),
+                    Some("B1".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![1.0, 1.0, 1.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("A1"), "stack SVG missing A1 legend");
+        assert!(svg.contains("B1"), "stack SVG missing B1 legend");
+        assert!(
+            !svg.contains("Series A") && !svg.contains("Series B"),
+            "fallback legend leaked through"
         );
     }
 
