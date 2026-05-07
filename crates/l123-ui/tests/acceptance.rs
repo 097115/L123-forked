@@ -1345,6 +1345,7 @@ transcripts! {
     graph_data_labels_placement => "graph_data_labels_placement.tsv",
     graph_options_grid_y_axis => "graph_options_grid_y_axis.tsv",
     graph_render_data_labels => "graph_render_data_labels.tsv",
+    graph_render_data_labels_bar => "graph_render_data_labels_bar.tsv",
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",

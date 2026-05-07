@@ -111,7 +111,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     match def.graph_type {
         GraphType::Bar => match (def.features.orientation, def.features.stacked) {
             (crate::Orientation::Vertical, false) => {
-                render_bar(vals, inner, buf, def.features.drop_shadow)
+                render_bar(def, vals, inner, buf, def.features.drop_shadow)
             }
             (crate::Orientation::Vertical, true) => {
                 render_bar_stacked(vals, inner, buf, def.features.percent)
@@ -544,10 +544,29 @@ fn write_centered(area: Rect, buf: &mut Buffer, msg: &str) {
 ///
 /// With only series A populated this collapses to the original
 /// single-series Bar layout: one wide bar per X, half-block top.
-fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer, drop_shadow: bool) {
+///
+/// When `data_labels[slot]` is bound for a populated series, each
+/// of that series' bars gets its label cell text painted at the
+/// placement offset relative to the bar's top — same idiom as
+/// the line renderer.
+fn render_bar(
+    def: &GraphDef,
+    vals: &GraphValues,
+    area: Rect,
+    buf: &mut Buffer,
+    drop_shadow: bool,
+) {
     const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
 
-    let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
+    // Pair each populated series with its original A..F slot so we
+    // can pull `data_label_text[slot]` and `data_labels_placement[slot]`.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
+    let series: Vec<&[f64]> = series_with_slot.iter().map(|(_, s)| *s).collect();
     if series.is_empty() {
         write_centered(area, buf, "No A..F data to plot.");
         return;
@@ -647,6 +666,23 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer, drop_shadow: boo
                         cell.set_style(shadow_style);
                     }
                 }
+            }
+            // Per-bar data label, if bound for this slot. Anchor at
+            // the bar's top cell (the half-block when present, the
+            // topmost full row otherwise) and let `paint_data_label`
+            // apply the placement offset.
+            let (slot, _) = series_with_slot[si];
+            if let Some(label) = vals
+                .data_label_text
+                .get(slot)
+                .and_then(|opt| opt.as_deref())
+                .and_then(|labels| labels.get(i).filter(|s| !s.is_empty()))
+            {
+                let bar_top_y =
+                    plot_bottom.saturating_sub(full_rows + u16::from(has_half));
+                let center_x = x_start + bar_width / 2;
+                let placement = def.options.data_labels_placement[slot];
+                paint_data_label(label, center_x, bar_top_y, placement, area, buf);
             }
         }
     }
@@ -1117,7 +1153,7 @@ fn render_mixed(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer
             data: [a, None, None, None, None, None],
             ..Default::default()
         };
-        render_bar(&bars, area, buf, false);
+        render_bar(def, &bars, area, buf, false);
     }
     if b.is_some() {
         let line = GraphValues {
