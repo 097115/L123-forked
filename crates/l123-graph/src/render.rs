@@ -102,11 +102,11 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
             (crate::Orientation::Horizontal, _) => render_bar_horizontal(vals, inner, buf),
         },
         GraphType::Stack => render_bar_stacked(vals, inner, buf, def.features.percent),
-        GraphType::Line => render_line(vals, inner, buf),
+        GraphType::Line => render_line(def, vals, inner, buf),
         GraphType::Pie => render_pie(vals, inner, buf),
-        GraphType::XY => render_xy(vals, inner, buf),
-        GraphType::Mixed => render_mixed(vals, inner, buf),
-        GraphType::HLCO => render_hlco(vals, inner, buf),
+        GraphType::XY => render_xy(def, vals, inner, buf),
+        GraphType::Mixed => render_mixed(def, vals, inner, buf),
+        GraphType::HLCO => render_hlco(def, vals, inner, buf),
     }
 }
 
@@ -819,8 +819,10 @@ fn render_bar_horizontal(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 
 /// Dot-per-sample line chart. Each A-series point is a `•` placed
 /// at its y-position. Spans the full plot width evenly regardless
-/// of how many samples there are.
-fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+/// of how many samples there are. Y bounds default to the A series'
+/// own min/max; `/Graph Options Scale Y Manual` with Lower / Upper
+/// overrides them via `ScaleAxis::apply`.
+fn render_line(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     let Some(series) = vals.first_series() else {
         write_centered(area, buf, "No numeric A-series values to plot.");
         return;
@@ -831,24 +833,33 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     if plot_height < 2 || series.is_empty() {
         return;
     }
-    let (min, max) = series
+    let (data_min, data_max) = series
         .iter()
         .copied()
         .filter(|v| v.is_finite())
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
             (lo.min(v), hi.max(v))
         });
-    let (min, max) = if !min.is_finite() || !max.is_finite() || min == max {
-        (0.0, 1.0)
-    } else {
-        (min, max)
-    };
+    let (data_min, data_max) =
+        if !data_min.is_finite() || !data_max.is_finite() || data_min == data_max {
+            (0.0, 1.0)
+        } else {
+            (data_min, data_max)
+        };
+    let (min, max) = def.options.scale_y.apply(data_min, data_max);
+    let (min, max) = if min >= max { (min, min + 1.0) } else { (min, max) };
     let style = Style::default().fg(Color::Cyan);
     let span = max - min;
     let n = series.len().max(1);
     let denom = (n - 1).max(1) as f64;
     for (i, v) in series.iter().copied().enumerate() {
         if !v.is_finite() {
+            continue;
+        }
+        // Clip to the effective Y window so manual Lower/Upper
+        // actually constrain the plot. With Auto bounds this is a
+        // no-op since min/max came from the data extent.
+        if v < min || v > max {
             continue;
         }
         let frac_x = if n == 1 { 0.5 } else { i as f64 / denom };
@@ -880,7 +891,7 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 /// renderers which use the A series' own extent. Falls back to a
 /// centered hint when A (high) is unset or no series has finite
 /// values.
-fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+fn render_hlco(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     let Some(high) = vals.data[0].as_deref() else {
         write_centered(area, buf, "HLCO needs series A (high).");
         return;
@@ -900,20 +911,26 @@ fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    let mut y_lo = f64::INFINITY;
-    let mut y_hi = f64::NEG_INFINITY;
+    let mut data_lo = f64::INFINITY;
+    let mut data_hi = f64::NEG_INFINITY;
     for s in [high, low, close, open] {
         for &v in s {
             if v.is_finite() {
-                y_lo = y_lo.min(v);
-                y_hi = y_hi.max(v);
+                data_lo = data_lo.min(v);
+                data_hi = data_hi.max(v);
             }
         }
     }
-    if !y_lo.is_finite() || !y_hi.is_finite() {
+    if !data_lo.is_finite() || !data_hi.is_finite() {
         write_centered(area, buf, "HLCO has no numeric values.");
         return;
     }
+    let (y_lo, y_hi) = def.options.scale_y.apply(data_lo, data_hi);
+    let (y_lo, y_hi) = if y_lo >= y_hi {
+        (y_lo, y_lo + 1.0)
+    } else {
+        (y_lo, y_hi)
+    };
     let span = if (y_hi - y_lo).abs() < f64::EPSILON {
         1.0
     } else {
@@ -939,8 +956,15 @@ fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         if bx >= area.right() {
             continue;
         }
-        let by_high = to_y(h.max(l));
-        let by_low = to_y(h.min(l));
+        // Clip H/L into the effective Y window so manual bounds
+        // actually constrain the visible bar.
+        let bar_top = h.max(l).min(y_hi);
+        let bar_bot = h.min(l).max(y_lo);
+        if bar_top < bar_bot {
+            continue;
+        }
+        let by_high = to_y(bar_top);
+        let by_low = to_y(bar_bot);
         for y in by_high..=by_low {
             if y < area.top() || y >= area.bottom() {
                 continue;
@@ -950,7 +974,7 @@ fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
             cell.set_style(bar_style);
         }
         let c = close.get(i).copied().unwrap_or(f64::NAN);
-        if c.is_finite() {
+        if c.is_finite() && c >= y_lo && c <= y_hi {
             let by = to_y(c);
             let cx = bx.saturating_add(1);
             if cx < area.right() && by >= area.top() && by < area.bottom() {
@@ -960,7 +984,7 @@ fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
             }
         }
         let o = open.get(i).copied().unwrap_or(f64::NAN);
-        if o.is_finite() && bx > area.left() {
+        if o.is_finite() && o >= y_lo && o <= y_hi && bx > area.left() {
             let by = to_y(o);
             let ox = bx - 1;
             if by >= area.top() && by < area.bottom() {
@@ -986,7 +1010,7 @@ fn render_hlco(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 /// When only A is set this collapses to a plain Bar; when only B
 /// is set, to a plain Line. When neither is set, prints a centered
 /// hint so the user knows to bind a series.
-fn render_mixed(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+fn render_mixed(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     let a = vals.data[0].clone();
     let b = vals.data[1].clone();
     if a.is_none() && b.is_none() {
@@ -1005,7 +1029,7 @@ fn render_mixed(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
             data: [b, None, None, None, None, None],
             ..Default::default()
         };
-        render_line(&line, area, buf);
+        render_line(def, &line, area, buf);
     }
 }
 
@@ -1021,7 +1045,7 @@ fn render_mixed(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 /// collapse to a single distinct x or y the corresponding axis span
 /// becomes a unit interval so the points still render at the
 /// midline.
-fn render_xy(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+fn render_xy(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     let Some(xs) = vals.x.as_deref() else {
         write_centered(area, buf, "XY graphs need an X range.");
         return;
@@ -1050,16 +1074,18 @@ fn render_xy(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         write_centered(area, buf, "XY needs finite X and A values.");
         return;
     }
-    let (x_min, x_max) = pairs
+    let (data_x_min, data_x_max) = pairs
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (x, _)| {
             (lo.min(*x), hi.max(*x))
         });
-    let (y_min, y_max) = pairs
+    let (data_y_min, data_y_max) = pairs
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, y)| {
             (lo.min(*y), hi.max(*y))
         });
+    let (x_min, x_max) = def.options.scale_x.apply(data_x_min, data_x_max);
+    let (y_min, y_max) = def.options.scale_y.apply(data_y_min, data_y_max);
     let x_span = if (x_max - x_min).abs() < f64::EPSILON {
         1.0
     } else {
@@ -1072,6 +1098,11 @@ fn render_xy(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     };
     let style = Style::default().fg(Color::Cyan);
     for (x, y) in pairs {
+        // Clip to the effective X / Y windows so manual bounds
+        // actually constrain the plot.
+        if x < x_min || x > x_max || y < y_min || y > y_max {
+            continue;
+        }
         let frac_x = (x - x_min) / x_span;
         let frac_y = (y - y_min) / y_span;
         let bx = area.left() + (frac_x * (area.width as f64 - 1.0)).round() as u16;
@@ -1487,6 +1518,43 @@ mod tests {
             has_tick_above_baseline(bar_col - 1),
             "expected open ─ tick at column {} (left of bar at {bar_col})",
             bar_col - 1
+        );
+    }
+
+    #[test]
+    fn line_honors_manual_y_upper_bound() {
+        // Data [1,2,3,4]. Without manual: the topmost • sits at the
+        // first plot row (max value pinned to top). With Manual
+        // Upper=100: the topmost • should land far below the top
+        // because 4/100 = 4% of the plot height.
+        let area = Rect::new(0, 0, 40, 14);
+        let topmost_dot_y = |def: &GraphDef| -> u16 {
+            let mut buf = Buffer::empty(area);
+            let vals = GraphValues {
+                data: [Some(vec![1.0, 2.0, 3.0, 4.0]), None, None, None, None, None],
+                ..Default::default()
+            };
+            render(def, &vals, area, &mut buf);
+            (0..buf.area.height)
+                .find(|y| (0..buf.area.width).any(|x| buf[(x, *y)].symbol() == "•"))
+                .expect("expected at least one • in line plot")
+        };
+
+        let auto_def = GraphDef {
+            graph_type: GraphType::Line,
+            ..Default::default()
+        };
+        let auto_top = topmost_dot_y(&auto_def);
+
+        let mut manual_def = auto_def.clone();
+        manual_def.options.scale_y.mode = crate::ScaleMode::Manual;
+        manual_def.options.scale_y.upper = Some(100.0);
+        let manual_top = topmost_dot_y(&manual_def);
+
+        assert!(
+            manual_top > auto_top + 4,
+            "Manual Upper=100 should push the topmost dot well below the auto top \
+             (auto={auto_top}, manual={manual_top})"
         );
     }
 }

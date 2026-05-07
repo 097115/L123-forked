@@ -143,13 +143,28 @@ pub struct Titles {
 /// `/Graph Options Scale {Y|X|2Y} {Lower|Upper}`. They're stored
 /// independently of `mode` — 1-2-3 retains them when you toggle
 /// back to Automatic so re-entering Manual restores the prior
-/// limits. (Renderers don't yet honor them; that lands in a
-/// follow-up.)
+/// limits.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct ScaleAxis {
     pub mode: ScaleMode,
     pub lower: Option<f64>,
     pub upper: Option<f64>,
+}
+
+impl ScaleAxis {
+    /// Apply this axis' scale settings to a data-derived
+    /// `(lo, hi)` pair. With `mode == Automatic` the data range
+    /// passes through unchanged. With `Manual`, `lower` and
+    /// `upper` (when set) override the corresponding side; the
+    /// other side falls back to the data extent. After overriding,
+    /// callers should still ensure `lo <= hi` and treat a zero
+    /// span as a unit interval to avoid div-by-zero.
+    pub fn apply(&self, data_lo: f64, data_hi: f64) -> (f64, f64) {
+        if self.mode != ScaleMode::Manual {
+            return (data_lo, data_hi);
+        }
+        (self.lower.unwrap_or(data_lo), self.upper.unwrap_or(data_hi))
+    }
 }
 
 /// `/Graph Options Advanced` — colors, hatch patterns, and text
