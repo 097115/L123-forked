@@ -64,18 +64,123 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         // No room left for a meaningful plot.
         return;
     }
+    // Frame goes around the plot rectangle; the inner area is what
+    // grid + data get to draw into so bars / dots don't overdraw the
+    // edges. Default is all four sides on (Reference p. 2-198).
+    let inner = render_frame(&def.features.frame, plot_area, buf);
+    if inner.height < 2 {
+        return;
+    }
     // Grid is painted first so the per-type renderers overwrite it
     // where their bars/dots fall. The dotted unicode glyphs sit
     // beneath the data without competing for visual weight.
-    render_grid_lines(&def.options.grid, plot_area, buf);
+    render_grid_lines(&def.options.grid, inner, buf);
     match def.graph_type {
-        GraphType::Bar => render_bar(vals, plot_area, buf),
-        GraphType::Line => render_line(vals, plot_area, buf),
+        GraphType::Bar => render_bar(vals, inner, buf),
+        GraphType::Line => render_line(vals, inner, buf),
         other => write_centered(
-            plot_area,
+            inner,
             buf,
             &format!("{other:?} graphs render in a later slice; press Esc to return."),
         ),
+    }
+}
+
+/// Paint the frame edges per `features.frame` and return the inner
+/// rectangle the data is allowed to fill. Each enabled edge consumes
+/// one row or column. Corner glyphs (`┌┐└┘`) only appear where both
+/// adjacent edges are on; otherwise the corner cell continues
+/// whichever edge is on (or stays blank).
+fn render_frame(frame: &crate::FrameMask, area: Rect, buf: &mut Buffer) -> Rect {
+    let style = Style::default().fg(Color::White);
+    let left_x = area.left();
+    let right_x = area.right().saturating_sub(1);
+    let top_y = area.top();
+    let bottom_y = area.bottom().saturating_sub(1);
+
+    // Edges (excluding corners, which are written below).
+    if frame.top && area.height >= 1 {
+        for x in (left_x + 1)..right_x {
+            buf[(x, top_y)].set_symbol("─");
+            buf[(x, top_y)].set_style(style);
+        }
+    }
+    if frame.bottom && area.height >= 2 {
+        for x in (left_x + 1)..right_x {
+            buf[(x, bottom_y)].set_symbol("─");
+            buf[(x, bottom_y)].set_style(style);
+        }
+    }
+    if frame.left && area.width >= 1 {
+        for y in (top_y + 1)..bottom_y {
+            buf[(left_x, y)].set_symbol("│");
+            buf[(left_x, y)].set_style(style);
+        }
+    }
+    if frame.right && area.width >= 2 {
+        for y in (top_y + 1)..bottom_y {
+            buf[(right_x, y)].set_symbol("│");
+            buf[(right_x, y)].set_style(style);
+        }
+    }
+    // Corners.
+    if area.width >= 1 && area.height >= 1 {
+        let glyph = corner_glyph(frame.top, frame.left, "┌", "─", "│");
+        if !glyph.is_empty() {
+            buf[(left_x, top_y)].set_symbol(glyph);
+            buf[(left_x, top_y)].set_style(style);
+        }
+    }
+    if area.width >= 2 && area.height >= 1 {
+        let glyph = corner_glyph(frame.top, frame.right, "┐", "─", "│");
+        if !glyph.is_empty() {
+            buf[(right_x, top_y)].set_symbol(glyph);
+            buf[(right_x, top_y)].set_style(style);
+        }
+    }
+    if area.width >= 1 && area.height >= 2 {
+        let glyph = corner_glyph(frame.bottom, frame.left, "└", "─", "│");
+        if !glyph.is_empty() {
+            buf[(left_x, bottom_y)].set_symbol(glyph);
+            buf[(left_x, bottom_y)].set_style(style);
+        }
+    }
+    if area.width >= 2 && area.height >= 2 {
+        let glyph = corner_glyph(frame.bottom, frame.right, "┘", "─", "│");
+        if !glyph.is_empty() {
+            buf[(right_x, bottom_y)].set_symbol(glyph);
+            buf[(right_x, bottom_y)].set_style(style);
+        }
+    }
+
+    // Compute inner rectangle by inset on every enabled side.
+    let inset_top = if frame.top { 1 } else { 0 };
+    let inset_bottom = if frame.bottom { 1 } else { 0 };
+    let inset_left = if frame.left { 1 } else { 0 };
+    let inset_right = if frame.right { 1 } else { 0 };
+    Rect::new(
+        area.x + inset_left,
+        area.y + inset_top,
+        area.width.saturating_sub(inset_left + inset_right),
+        area.height.saturating_sub(inset_top + inset_bottom),
+    )
+}
+
+/// Pick the glyph for one corner: both edges on → corner; only the
+/// horizontal edge on → `─`; only the vertical → `│`; neither →
+/// empty (caller leaves the cell blank).
+fn corner_glyph(
+    horizontal: bool,
+    vertical: bool,
+    corner: &'static str,
+    h_only: &'static str,
+    v_only: &'static str,
+) -> &'static str {
+    match (horizontal, vertical) {
+        (true, true) => corner,
+        (true, false) => h_only,
+        (false, true) => v_only,
+        (false, false) => "",
     }
 }
 
