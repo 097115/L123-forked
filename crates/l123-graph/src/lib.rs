@@ -138,9 +138,18 @@ pub struct Titles {
 }
 
 /// `/Graph Options Scale {axis}` settings, per axis.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+///
+/// `lower` / `upper` are the manual bounds set via
+/// `/Graph Options Scale {Y|X|2Y} {Lower|Upper}`. They're stored
+/// independently of `mode` — 1-2-3 retains them when you toggle
+/// back to Automatic so re-entering Manual restores the prior
+/// limits. (Renderers don't yet honor them; that lands in a
+/// follow-up.)
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct ScaleAxis {
     pub mode: ScaleMode,
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
 }
 
 /// `/Graph Options Advanced` — colors, hatch patterns, and text
@@ -172,7 +181,7 @@ pub struct GraphFeatures {
 /// Manual `Default` impl below: `color = true` (color on, B&W off) and
 /// `skip = 1` (every x-axis label drawn). Every other field uses its
 /// type's derived default.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GraphOptions {
     pub legend: [Option<String>; 6],
     pub format: [LineFormat; 6],
@@ -208,7 +217,7 @@ impl Default for GraphOptions {
 }
 
 /// All state that makes up a single graph definition.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct GraphDef {
     pub graph_type: GraphType,
     pub x: Option<Range>,

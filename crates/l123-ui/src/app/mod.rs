@@ -2275,6 +2275,30 @@ impl App {
         self.mode = Mode::Menu;
     }
 
+    fn start_graph_scale_bound_prompt(&mut self, axis: GraphScaleAxis, upper: bool) {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            GraphScaleAxis::Y => &opts.scale_y,
+            GraphScaleAxis::X => &opts.scale_x,
+            GraphScaleAxis::TwoY => &opts.scale_2y,
+        };
+        let current = if upper { s.upper } else { s.lower };
+        let kind = if upper { "upper" } else { "lower" };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale {kind} limit (blank to clear):"),
+            buffer: current.map(|v| v.to_string()).unwrap_or_default(),
+            next: PromptNext::GraphOptionsScaleBound { axis, upper },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
     /// Read accessors for tests.
     pub fn graph_scale_mode_str(&self, axis: char) -> &'static str {
         let opts = &self.wb().current_graph.options;
@@ -2291,6 +2315,19 @@ impl App {
     }
     pub fn graph_scale_skip(&self) -> u32 {
         self.wb().current_graph.options.skip
+    }
+    /// Read accessor for `/Graph Options Scale {axis} {Lower|Upper}`.
+    /// `axis` is 'Y', 'X', or '2'; `upper` selects which bound. Returns
+    /// `None` when the bound is unset.
+    pub fn graph_scale_bound(&self, axis: char, upper: bool) -> Option<f64> {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return None,
+        };
+        if upper { s.upper } else { s.lower }
     }
 
     /// `/Graph Options Legend {A..F}` — open a single-line text prompt
@@ -3553,6 +3590,24 @@ impl App {
             Action::GraphOptionsScale2YAuto => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Automatic),
             Action::GraphOptionsScale2YManual => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Manual),
             Action::GraphOptionsScaleSkip => self.start_graph_skip_prompt(),
+            Action::GraphOptionsScaleYLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::Y, false)
+            }
+            Action::GraphOptionsScaleYUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::Y, true)
+            }
+            Action::GraphOptionsScaleXLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::X, false)
+            }
+            Action::GraphOptionsScaleXUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::X, true)
+            }
+            Action::GraphOptionsScale2YLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::TwoY, false)
+            }
+            Action::GraphOptionsScale2YUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::TwoY, true)
+            }
             Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
             Action::GraphNameCreate => {
                 self.start_graph_name_prompt(PromptNext::GraphNameCreate, "Create")
@@ -8505,6 +8560,33 @@ impl App {
                 let parsed: u32 = p.buffer.parse().unwrap_or(current);
                 let clamped = parsed.clamp(1, 8192);
                 self.wb_mut().current_graph.options.skip = clamped;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleBound { axis, upper } => {
+                let trimmed = p.buffer.trim();
+                let new_val: Option<f64> = if trimmed.is_empty() {
+                    None
+                } else {
+                    match trimmed.parse::<f64>() {
+                        Ok(v) if v.is_finite() => Some(v),
+                        _ => {
+                            // Unparseable input — leave the bound untouched.
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let s = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                if upper {
+                    s.upper = new_val;
+                } else {
+                    s.lower = new_val;
+                }
                 self.mode = Mode::Ready;
             }
             PromptNext::GraphNameUse => {

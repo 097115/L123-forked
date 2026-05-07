@@ -683,6 +683,15 @@ pub enum Action {
     GraphOptionsScaleXManual,
     GraphOptionsScale2YAuto,
     GraphOptionsScale2YManual,
+    /// `/Graph Options Scale {axis} {Lower|Upper}` — open a numeric
+    /// prompt for the manual axis bound. Pre-fills with the current
+    /// value; an empty buffer + Enter clears the bound.
+    GraphOptionsScaleYLower,
+    GraphOptionsScaleYUpper,
+    GraphOptionsScaleXLower,
+    GraphOptionsScaleXUpper,
+    GraphOptionsScale2YLower,
+    GraphOptionsScale2YUpper,
     /// `/Graph Options Scale Skip` — numeric prompt; commit sets
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
@@ -4280,7 +4289,7 @@ const GO_ADVANCED_MENU: &[MenuItem] = &[
 // `lower`, `upper`, `format`, `indicator`, `type_`, `exponent`, and
 // `width` fields.
 macro_rules! gos_axis_menu {
-    ($auto:expr, $manual:expr, $lower:literal, $upper:literal, $format:literal,
+    ($auto:expr, $manual:expr, $lower:expr, $upper:expr, $format:literal,
      $indicator:literal, $type_:literal, $exponent:literal, $width:literal) => {
         &[
             MenuItem {
@@ -4302,14 +4311,14 @@ macro_rules! gos_axis_menu {
                 name: "Lower",
                 help: "Manual lower limit",
                 help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
-                body: MenuBody::NotImplemented($lower),
+                body: MenuBody::Action($lower),
             },
             MenuItem {
                 letter: 'U',
                 name: "Upper",
                 help: "Manual upper limit",
                 help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
-                body: MenuBody::NotImplemented($upper),
+                body: MenuBody::Action($upper),
             },
             MenuItem {
                 letter: 'F',
@@ -4360,8 +4369,8 @@ macro_rules! gos_axis_menu {
 const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleYAuto,
     Action::GraphOptionsScaleYManual,
-    "gosy-lower",
-    "gosy-upper",
+    Action::GraphOptionsScaleYLower,
+    Action::GraphOptionsScaleYUpper,
     "gosy-format",
     "gosy-indicator",
     "gosy-type",
@@ -4371,8 +4380,8 @@ const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
 const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleXAuto,
     Action::GraphOptionsScaleXManual,
-    "gosx-lower",
-    "gosx-upper",
+    Action::GraphOptionsScaleXLower,
+    Action::GraphOptionsScaleXUpper,
     "gosx-format",
     "gosx-indicator",
     "gosx-type",
@@ -4382,8 +4391,8 @@ const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
 const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScale2YAuto,
     Action::GraphOptionsScale2YManual,
-    "gos2-lower",
-    "gos2-upper",
+    Action::GraphOptionsScale2YLower,
+    Action::GraphOptionsScale2YUpper,
     "gos2-format",
     "gos2-indicator",
     "gos2-type",

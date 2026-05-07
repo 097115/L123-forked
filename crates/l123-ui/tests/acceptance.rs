@@ -533,6 +533,33 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_SCALE_BOUND Y LOWER 100" — axis token
+            // (Y, X, or 2), bound kind (LOWER | UPPER), expected
+            // numeric value (or `none` for unset).
+            "ASSERT_GRAPH_SCALE_BOUND" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let kind_tok = parts.next().unwrap_or("");
+                let want_raw = parts.next().unwrap_or("");
+                let want: Option<f64> = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw.parse().unwrap_or_else(|_| {
+                        panic!(
+                            "{}:{line_no}: ASSERT_GRAPH_SCALE_BOUND expected number or 'none', got {want_raw:?}",
+                            path.display()
+                        )
+                    }))
+                };
+                let upper = matches!(kind_tok.to_ascii_uppercase().as_str(), "UPPER");
+                let got = app.graph_scale_bound(axis_ch, upper);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale bound {axis_ch} {kind_tok} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_SCALE_SKIP 5" — current skip factor.
             "ASSERT_GRAPH_SCALE_SKIP" => {
                 let want: u32 = rest.parse().unwrap_or_else(|_| {
@@ -1273,6 +1300,7 @@ transcripts! {
     graph_options_legend => "graph_options_legend.tsv",
     graph_options_legend_range => "graph_options_legend_range.tsv",
     graph_reset_leaves => "graph_reset_leaves.tsv",
+    graph_options_scale_bounds => "graph_options_scale_bounds.tsv",
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",

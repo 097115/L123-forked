@@ -1371,6 +1371,14 @@ pub(super) enum PromptNext {
     /// `/Graph Options Scale Skip` — numeric prompt. Commit clamps to
     /// `1..=8192` and writes `current_graph.options.skip`.
     GraphOptionsScaleSkip,
+    /// `/Graph Options Scale {axis} {Lower|Upper}` — signed numeric
+    /// prompt. Commit parses the buffer as f64 and writes the chosen
+    /// bound; an empty buffer clears it back to None. Unparseable input
+    /// leaves the prior value untouched.
+    GraphOptionsScaleBound {
+        axis: GraphScaleAxis,
+        upper: bool,
+    },
     /// `/Graph Name Use` — text prompt; commit replaces
     /// `current_graph` with the matching entry from `Workbook::graphs`.
     /// Unknown names are no-ops.
@@ -1570,6 +1578,10 @@ impl PromptNext {
             }
             // Skip is a small integer (1..=8192). Digits only.
             PromptNext::GraphOptionsScaleSkip => c.is_ascii_digit(),
+            // Scale Lower/Upper take signed decimals.
+            PromptNext::GraphOptionsScaleBound { .. } => {
+                c.is_ascii_digit() || c == '-' || c == '.'
+            }
         }
     }
 }
