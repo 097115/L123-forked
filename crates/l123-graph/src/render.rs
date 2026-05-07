@@ -395,24 +395,43 @@ fn write_centered(area: Rect, buf: &mut Buffer, msg: &str) {
     buf.set_string(x0, y, msg, Style::default());
 }
 
-/// Half-block bar chart. One column per A-series value. Height in
-/// half-rows is `2 * (row_height) * val / max_abs`, rounded; odd half
-/// steps use `▄` (lower half block) / `▀` (upper half block) for the
-/// fractional cell at the top of the bar.
+/// Vertical bar chart. Every populated A..F slot becomes its own
+/// series in a side-by-side cluster at each X position (the default
+/// 1-2-3 R3.4a layout for multi-series Bar; Reference p. 2-156).
+/// Each series uses a distinct shading glyph so identity reads
+/// visually: A=`█`, B=`▓`, C=`▒`, D=`░` (E/F cycle).
+///
+/// Height resolution is half-row: `▄` (lower half block) caps the
+/// partial cell at the top of a bar — same series-agnostic glyph
+/// used by the original single-series renderer because mixing two
+/// series across one cell can't be represented in a single Buffer
+/// cell.
+///
+/// With only series A populated this collapses to the original
+/// single-series Bar layout: one wide bar per X, half-block top.
 fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
-    let Some(series) = vals.first_series() else {
-        write_centered(area, buf, "No numeric A-series values to plot.");
+    const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
+
+    let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
+    if series.is_empty() {
+        write_centered(area, buf, "No A..F data to plot.");
         return;
-    };
-    // Leave the bottom row for the baseline axis.
+    }
     let plot_top = area.top();
     let plot_bottom = area.bottom().saturating_sub(1);
     let plot_height = plot_bottom.saturating_sub(plot_top);
-    if plot_height < 2 || series.is_empty() {
+    if plot_height < 2 {
         return;
     }
+    let n = series.iter().map(|s| s.len()).max().unwrap_or(0);
+    if n == 0 {
+        return;
+    }
+    // Global max across every populated series — bar heights compare
+    // across the whole graph.
     let max = series
         .iter()
+        .flat_map(|s| s.iter())
         .copied()
         .filter(|v| v.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
@@ -422,44 +441,56 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         max
     };
 
-    let bar_count = series.len() as u16;
+    let group_count = n as u16;
     let plot_width = area.width;
-    // One column per bar, one column of padding between them when we
-    // can afford it.
-    let step = (plot_width / bar_count).max(1);
-    let bar_width = step.saturating_sub(1).max(1);
+    let group_step = (plot_width / group_count).max(1);
+    let group_width = group_step.saturating_sub(1).max(1);
+    let series_count = series.len() as u16;
+    // Bars within a group share the group's width.
+    let bar_width = (group_width / series_count).max(1);
 
-    let full = "█";
     let half = "▄";
     let style = Style::default().fg(Color::Cyan);
 
-    for (i, v) in series.iter().copied().enumerate() {
-        if !v.is_finite() || v <= 0.0 {
-            continue;
-        }
-        let x0 = area.left() + (i as u16) * step;
-        let height_halves = ((v / max) * plot_height as f64 * 2.0).round() as u16;
-        let full_rows = height_halves / 2;
-        let has_half = height_halves % 2 == 1;
-        for row in 0..full_rows {
-            let y = plot_bottom.saturating_sub(1 + row);
-            for bx in 0..bar_width {
-                let x = x0 + bx;
-                if x < area.right() && y >= area.top() {
+    for i in 0..n {
+        let group_x0 = area.left() + (i as u16) * group_step;
+        for (si, s) in series.iter().enumerate() {
+            let v = s.get(i).copied().unwrap_or(f64::NAN);
+            if !v.is_finite() || v <= 0.0 {
+                continue;
+            }
+            let x_start = group_x0 + (si as u16) * bar_width;
+            let height_halves = ((v / max) * plot_height as f64 * 2.0).round() as u16;
+            let full_rows = height_halves / 2;
+            let has_half = height_halves % 2 == 1;
+            let glyph = GLYPHS[si % GLYPHS.len()];
+            for row in 0..full_rows {
+                let y = plot_bottom.saturating_sub(1 + row);
+                if y < area.top() {
+                    break;
+                }
+                for bx in 0..bar_width {
+                    let x = x_start + bx;
+                    if x >= area.right() {
+                        break;
+                    }
                     let cell = &mut buf[(x, y)];
-                    cell.set_symbol(full);
+                    cell.set_symbol(glyph);
                     cell.set_style(style);
                 }
             }
-        }
-        if has_half {
-            let y = plot_bottom.saturating_sub(1 + full_rows);
-            for bx in 0..bar_width {
-                let x = x0 + bx;
-                if x < area.right() && y >= area.top() {
-                    let cell = &mut buf[(x, y)];
-                    cell.set_symbol(half);
-                    cell.set_style(style);
+            if has_half {
+                let y = plot_bottom.saturating_sub(1 + full_rows);
+                if y >= area.top() {
+                    for bx in 0..bar_width {
+                        let x = x_start + bx;
+                        if x >= area.right() {
+                            break;
+                        }
+                        let cell = &mut buf[(x, y)];
+                        cell.set_symbol(half);
+                        cell.set_style(style);
+                    }
                 }
             }
         }

@@ -53,11 +53,15 @@ DOWN
 ENTER
 ASSERT_GRAPH_SERIES  B  A:B1..A:B3
 
-# Default Bar with stacked=false: only series A renders → only █.
+# Default Bar (stacked = false) clusters A and B side by side, so
+# both glyphs are visible. The visual distinction between clustered
+# and stacked is layout, not glyph presence — pinned by
+# stacked_percent_normalizes_each_column_to_full_height in
+# l123-graph::render unit tests.
 F 10
 ASSERT_MODE       GRAPH
 ASSERT_SCREEN     █
-ASSERT_SCREEN_NOT_CONTAINS  ▓
+ASSERT_SCREEN     ▓
 ESC
 
 # /GTFSY — Stacked Yes.

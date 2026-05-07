@@ -1,0 +1,62 @@
+# /Graph F10 view — clustered multi-series Bar.
+#
+# Slice F (clustered Bar) of GRAPH_PLAN.md. Default 1-2-3 R3.4a
+# behavior for Bar with multiple populated A..F series and
+# features.stacked = false: bars from each series sit side-by-side
+# at every X position (a "group" per X).
+#
+# Each series uses a distinct shading glyph so identity reads
+# visually: A → █, B → ▓, C → ▒, D → ░ (E/F cycle).
+
+SIZE 80 30
+
+# Seed A1..A3 = 1, 2, 3; B1..B3 = 4, 5, 6.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+HOME
+RIGHT
+KEYS 4
+DOWN
+KEYS 5
+DOWN
+KEYS 6
+DOWN
+HOME
+ASSERT_POINTER     A:A1
+
+# /GTB
+KEY /
+KEY G
+KEY T
+KEY B
+# /GA → A1..A3
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A3
+HOME
+RIGHT
+# /GB → B1..B3
+KEY /
+KEY G
+KEY B
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  B  A:B1..A:B3
+
+# Default Bar (stacked = false). Both A and B series should now
+# render as side-by-side clusters per X position.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+ASSERT_SCREEN     ▓
+ESC
+ASSERT_MODE       READY
