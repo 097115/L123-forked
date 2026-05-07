@@ -59,7 +59,12 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         return;
     }
     let with_titles = reserve_title_rows(area, &def.options.titles, buf);
-    let plot_area = reserve_legend_row(with_titles, &def.options.legend, buf);
+    let with_legend = reserve_legend_row(with_titles, &def.options.legend, buf);
+    let plot_area = if def.features.table {
+        reserve_value_table_rows(with_legend, vals, buf)
+    } else {
+        with_legend
+    };
     if plot_area.height < 3 {
         // No room left for a meaningful plot.
         return;
@@ -233,6 +238,69 @@ fn render_grid_lines(grid: &crate::GridMask, area: Rect, buf: &mut Buffer) {
                 }
             }
         }
+    }
+}
+
+/// Paint a small value table at the bottom of `area`, one row per
+/// populated A..F series, listing each series' values across X
+/// positions. Returns the area shrunk upward by however many rows
+/// the table consumed. Per Reference p. 2-198, this surfaces under
+/// `/Graph Type Features Table Yes` for line / bar / stacked bar /
+/// mixed graphs.
+///
+/// No-op when no series is populated, when `n` (max series length)
+/// is zero, or when there isn't enough vertical or horizontal room.
+/// Each value gets a fixed-width column so columns line up.
+fn reserve_value_table_rows(area: Rect, vals: &GraphValues, buf: &mut Buffer) -> Rect {
+    let series: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(i, opt)| opt.as_deref().map(|s| (i, s)))
+        .collect();
+    if series.is_empty() {
+        return area;
+    }
+    let rows_needed = series.len() as u16;
+    if rows_needed + 3 >= area.height || area.width < 16 {
+        return area;
+    }
+    const LABEL_WIDTH: u16 = 4; // "A:  "
+    const COL_WIDTH: u16 = 7;
+    let style = Style::default().fg(Color::White);
+    let top = area.bottom().saturating_sub(rows_needed);
+    for (row_i, (slot, s)) in series.iter().enumerate() {
+        let y = top + row_i as u16;
+        let letter = (b'A' + *slot as u8) as char;
+        buf.set_string(area.left() + 1, y, format!("{letter}: "), style);
+        for (col, &v) in s.iter().enumerate() {
+            let x = area.left() + 1 + LABEL_WIDTH + (col as u16) * COL_WIDTH;
+            if x + COL_WIDTH > area.right() {
+                break;
+            }
+            let text = if v.is_finite() {
+                format!("{:>w$}", strip_trailing_zero(v), w = COL_WIDTH as usize)
+            } else {
+                format!("{:>w$}", "-", w = COL_WIDTH as usize)
+            };
+            buf.set_string(x, y, text, style);
+        }
+    }
+    Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(rows_needed),
+    )
+}
+
+/// Render `v` without a trailing `.0` when it's an integer; up to
+/// two decimal places otherwise. Keeps the table tidy.
+fn strip_trailing_zero(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v:.2}")
     }
 }
 
