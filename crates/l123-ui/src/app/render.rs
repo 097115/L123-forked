@@ -971,8 +971,20 @@ impl App {
             Line::from(Span::raw("Grid Lines")),
             Line::from(mark(o.grid.horizontal, "Horizontal")),
             Line::from(mark(o.grid.vertical, "Vertical")),
-            Line::from(mark(o.grid.y_axis, "Y-Axis")),
-            Line::from(mark(false, "2Y-Axis")),
+            Line::from(mark(
+                matches!(
+                    o.grid.y_axis,
+                    Some(l123_graph::GridYAxisOrigin::First | l123_graph::GridYAxisOrigin::Both),
+                ),
+                "Y-Axis",
+            )),
+            Line::from(mark(
+                matches!(
+                    o.grid.y_axis,
+                    Some(l123_graph::GridYAxisOrigin::Second | l123_graph::GridYAxisOrigin::Both),
+                ),
+                "2Y-Axis",
+            )),
         ];
         Paragraph::new(lines).style(text).render(inner, buf);
     }

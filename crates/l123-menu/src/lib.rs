@@ -591,6 +591,11 @@ pub enum Action {
     /// `/Graph Options Quit` — return to `/Graph` menu.
     GraphOptionsQuit,
     /// `/Graph Options Grid Horizontal` — turn on horizontal grid lines.
+    /// `/Graph Options Grid Y-Axis {Y|2Y|Both}` — choose which
+    /// y-axis the horizontal grid lines originate from.
+    GraphOptionsGridYAxisFirst,
+    GraphOptionsGridYAxisSecond,
+    GraphOptionsGridYAxisBoth,
     GraphOptionsGridHorizontal,
     /// `/Graph Options Grid Vertical` — turn on vertical grid lines.
     GraphOptionsGridVertical,
@@ -4861,6 +4866,30 @@ const GO_FORMAT_MENU: &[MenuItem] = &[
 // /Graph Options Grid — direct add-only actions per Reference p. 2-200
 // (0090-graph-options-grid.html). Single sides cannot be removed
 // individually; use Clear and re-add.
+const GO_GRID_Y_AXIS_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'Y',
+        name: "Y",
+        help: "Anchor horizontal grid lines to the first y-axis",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridYAxisFirst),
+    },
+    MenuItem {
+        letter: '2',
+        name: "2Y",
+        help: "Anchor horizontal grid lines to the second y-axis",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridYAxisSecond),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "Both",
+        help: "Anchor horizontal grid lines to both y-axes",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridYAxisBoth),
+    },
+];
+
 const GO_GRID_MENU: &[MenuItem] = &[
     MenuItem {
         letter: 'H',
@@ -4890,15 +4919,12 @@ const GO_GRID_MENU: &[MenuItem] = &[
         help_page: "0090-graph-options-grid.html",
         body: MenuBody::Action(Action::GraphOptionsGridClear),
     },
-    // Y-Axis sub-tree (Y / 2Y / Both — origin axis for horizontal
-    // grids) is deferred until the data model carries the second
-    // y-axis grid bool. Slice F flesh-out.
     MenuItem {
         letter: 'Y',
         name: "Y-Axis",
         help: "Choose which y-axis horizontal grids originate from",
         help_page: "0090-graph-options-grid.html",
-        body: MenuBody::NotImplemented("gog-y-axis"),
+        body: MenuBody::Submenu(GO_GRID_Y_AXIS_MENU),
     },
 ];
 

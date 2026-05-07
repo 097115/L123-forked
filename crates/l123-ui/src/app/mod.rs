@@ -1441,7 +1441,7 @@ impl App {
         if g.vertical {
             out.push('v');
         }
-        if g.y_axis {
+        if g.y_axis.is_some() {
             out.push('y');
         }
         if out.is_empty() {
@@ -2400,6 +2400,23 @@ impl App {
         match r {
             None => String::new(),
             Some(rr) => format!("{}..{}", rr.start.display_full(), rr.end.display_full()),
+        }
+    }
+
+    /// Shared back end for the three `/Graph Options Grid Y-Axis`
+    /// leaves. `None` clears the origin (no Y-axis-anchored grid).
+    fn set_graph_grid_y_axis(&mut self, origin: Option<l123_graph::GridYAxisOrigin>) {
+        self.wb_mut().current_graph.options.grid.y_axis = origin;
+        self.close_menu();
+    }
+
+    /// Read accessor for `current_graph.options.grid.y_axis` as the
+    /// `GridYAxisOrigin::tag` string ("Y", "2Y", "Both") or "none"
+    /// when unset.
+    pub fn graph_grid_y_axis_str(&self) -> &'static str {
+        match self.wb().current_graph.options.grid.y_axis {
+            None => "none",
+            Some(o) => o.tag(),
         }
     }
 
@@ -3580,6 +3597,15 @@ impl App {
             Action::GraphOptionsGridClear => {
                 self.wb_mut().current_graph.options.grid = l123_graph::GridMask::default();
                 self.close_menu();
+            }
+            Action::GraphOptionsGridYAxisFirst => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::First));
+            }
+            Action::GraphOptionsGridYAxisSecond => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::Second));
+            }
+            Action::GraphOptionsGridYAxisBoth => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::Both));
             }
             Action::GraphFormatGraphLines => self.set_graph_format(None, l123_graph::LineFormat::Lines),
             Action::GraphFormatGraphSymbols => self.set_graph_format(None, l123_graph::LineFormat::Symbols),

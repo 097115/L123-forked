@@ -608,6 +608,18 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_GRID_Y_AXIS Y" — current y-axis grid
+            // origin (one of `none`, `Y`, `2Y`, `Both`).
+            "ASSERT_GRAPH_GRID_Y_AXIS" => {
+                let want = rest.trim();
+                let got = app.graph_grid_y_axis_str();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: grid y-axis expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_DATA_LABELS_PLACEMENT A  Center" — slot
             // letter A..F, then expected placement (Center | Left |
             // Above | Right | Below).
@@ -1331,6 +1343,7 @@ transcripts! {
     graph_frame_y_axis => "graph_frame_y_axis.tsv",
     graph_name_table => "graph_name_table.tsv",
     graph_data_labels_placement => "graph_data_labels_placement.tsv",
+    graph_options_grid_y_axis => "graph_options_grid_y_axis.tsv",
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",

@@ -120,13 +120,36 @@ impl Default for FrameMask {
     }
 }
 
+/// `/Graph Options Grid Y-Axis` — which y-axis the horizontal grid
+/// lines originate from when the user enables a Y-Axis-anchored
+/// grid. `Both` means horizontal grids are drawn at every tick of
+/// each axis. Reference p. 2-203.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum GridYAxisOrigin {
+    #[default]
+    First,
+    Second,
+    Both,
+}
+
+impl GridYAxisOrigin {
+    pub fn tag(self) -> &'static str {
+        match self {
+            GridYAxisOrigin::First => "Y",
+            GridYAxisOrigin::Second => "2Y",
+            GridYAxisOrigin::Both => "Both",
+        }
+    }
+}
+
 /// `/Graph Options Grid` — independent toggles for horizontal /
-/// vertical / y-axis grid lines. Default is no grid.
+/// vertical grid lines plus a Y-Axis-anchored grid origin. Default
+/// is no grid in any direction (`y_axis = None`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct GridMask {
     pub horizontal: bool,
     pub vertical: bool,
-    pub y_axis: bool,
+    pub y_axis: Option<GridYAxisOrigin>,
 }
 
 /// `/Graph Options Data-Labels {slot}` placement — where the label
@@ -478,7 +501,7 @@ mod tests {
         let g = GridMask::default();
         assert!(!g.horizontal);
         assert!(!g.vertical);
-        assert!(!g.y_axis);
+        assert!(g.y_axis.is_none());
     }
 
     #[test]
