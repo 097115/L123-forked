@@ -103,6 +103,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         },
         GraphType::Stack => render_bar_stacked(vals, inner, buf, def.features.percent),
         GraphType::Line => render_line(vals, inner, buf),
+        GraphType::Pie => render_pie(vals, inner, buf),
         other => write_centered(
             inner,
             buf,
@@ -870,6 +871,109 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Pie chart, terminal flavor: a single horizontal proportional bar
+/// where each wedge is a contiguous run of cells, glyph per wedge in
+/// the same A=`█` B=`▓` C=`▒` D=`░` palette as the bar/stack
+/// renderers. A labels row underneath shows each wedge's text — the
+/// X-range cell text per wedge when bound, else a 1-based positional
+/// index. The bar is centered vertically in `area`.
+///
+/// Matches the data-flow contract that `draw_pie` (raster) uses:
+/// non-finite or non-positive A values are dropped so that the
+/// surviving wedges keep their original X-index alignment for
+/// labels. When no positive values remain, falls back to a centered
+/// "Pie needs positive values." message.
+fn render_pie(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
+
+    let Some(a) = vals.data[0].as_deref() else {
+        write_centered(area, buf, "Set /Graph A to plot a pie.");
+        return;
+    };
+    let pairs: Vec<(usize, f64)> = a
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, v)| v.is_finite() && *v > 0.0)
+        .collect();
+    if pairs.is_empty() {
+        write_centered(area, buf, "Pie needs positive values.");
+        return;
+    }
+    let total: f64 = pairs.iter().map(|(_, v)| *v).sum();
+    if total <= 0.0 {
+        write_centered(area, buf, "Pie needs positive values.");
+        return;
+    }
+    let plot_width = area.width;
+    if plot_width < 4 || area.height < 3 {
+        return;
+    }
+    let bar_y = area.top() + area.height / 2;
+    let label_y = bar_y.saturating_add(1);
+    let style = Style::default().fg(Color::Cyan);
+
+    // Walk wedges left to right. Use the cumulative share (not the
+    // wedge's own share) to compute each end-x so rounding error
+    // never starves the next wedge — the alternative leaves a thin
+    // wedge with one cell when an earlier wedge rounds upward.
+    let mut cursor: u16 = area.left();
+    let mut cumulative: f64 = 0.0;
+    let bar_right = area.right();
+    let labels = vals.x_labels.as_deref();
+    for (wedge_i, (orig_i, v)) in pairs.iter().enumerate() {
+        let last = wedge_i + 1 == pairs.len();
+        cumulative += *v;
+        let target_end = if last {
+            bar_right
+        } else {
+            let frac = cumulative / total;
+            area.left() + (frac * plot_width as f64).round() as u16
+        };
+        let end = target_end.max(cursor.saturating_add(1)).min(bar_right);
+        let glyph = GLYPHS[wedge_i % GLYPHS.len()];
+        for x in cursor..end {
+            let cell = &mut buf[(x, bar_y)];
+            cell.set_symbol(glyph);
+            cell.set_style(style);
+        }
+        // Labels: write each wedge's label centered under its run,
+        // truncated to fit. Labels overlap when wedges are tiny;
+        // that's the same trade-off the raster Pie hits.
+        if label_y < area.bottom() {
+            let label = wedge_label_unicode(labels, *orig_i, wedge_i);
+            let run_w = end.saturating_sub(cursor);
+            if run_w > 0 {
+                let truncated: String = label.chars().take(run_w as usize).collect();
+                let len = truncated.chars().count() as u16;
+                let pad = run_w.saturating_sub(len) / 2;
+                let lx = cursor + pad;
+                buf.set_string(lx, label_y, truncated, style);
+            }
+        }
+        cursor = end;
+        if cursor >= bar_right {
+            break;
+        }
+    }
+}
+
+/// Mirror of `raster::wedge_label`: prefers the cell-text label for
+/// the original X position, falls back to a 1-based positional
+/// index when the cell is blank. Kept private to render.rs because
+/// it's intentionally the same contract as the raster path so the
+/// two backends agree on every wedge's label.
+fn wedge_label_unicode(x_labels: Option<&[String]>, orig_i: usize, wedge_i: usize) -> String {
+    if let Some(labels) = x_labels {
+        if let Some(s) = labels.get(orig_i) {
+            if !s.trim().is_empty() {
+                return s.clone();
+            }
+        }
+    }
+    format!("{}", wedge_i + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,8 +1132,8 @@ mod tests {
 
     #[test]
     fn unimplemented_type_shows_placeholder() {
-        let buf = render_to(GraphType::Pie, vec![1.0, 2.0, 3.0], 80, 10);
-        assert!(contains(&buf, "Pie"));
+        let buf = render_to(GraphType::HLCO, vec![1.0, 2.0, 3.0], 80, 10);
+        assert!(contains(&buf, "HLCO"));
         assert!(contains(&buf, "later slice"));
     }
 
