@@ -1876,6 +1876,66 @@ fn icon_click_graph_view_enters_graph_mode() {
 }
 
 #[test]
+fn horizontal_bar_renders_half_block_via_full_app_render() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new();
+    // Seed A1..A5 = 1..5 directly via the engine.
+    for (row, v) in (0..5u32).zip([1.0, 2.0, 3.0, 4.0, 5.0]) {
+        let addr = l123_core::Address {
+            sheet: l123_core::SheetId(0),
+            col: 0,
+            row,
+        };
+        app.wb_mut()
+            .engine
+            .set_user_input(addr, &v.to_string())
+            .unwrap();
+    }
+    let press = |app: &mut App, code: KeyCode| {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    };
+    press(&mut app, KeyCode::Home);
+    // /GTB
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('T'));
+    press(&mut app, KeyCode::Char('B'));
+    // /GA, DOWN x4, ENTER
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('A'));
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Down);
+    }
+    press(&mut app, KeyCode::Enter);
+    // /GTFH — orientation horizontal.
+    press(&mut app, KeyCode::Char('/'));
+    press(&mut app, KeyCode::Char('G'));
+    press(&mut app, KeyCode::Char('T'));
+    press(&mut app, KeyCode::Char('F'));
+    press(&mut app, KeyCode::Char('H'));
+    // F10 → enter graph view.
+    press(&mut app, KeyCode::F(10));
+    assert_eq!(app.mode, Mode::Graph);
+    assert_eq!(
+        app.wb().current_graph.features.orientation,
+        l123_graph::Orientation::Horizontal,
+        "orientation should be Horizontal after /GTFH"
+    );
+
+    let buf = app.render_to_buffer(80, 30);
+    let mut dump = String::new();
+    for y in 0..buf.area.height {
+        dump.push_str(&App::line_text(&buf, y));
+        dump.push('\n');
+    }
+    assert!(
+        dump.contains("▌"),
+        "no ▌ in rendered horizontal bar; rendered:\n{dump}"
+    );
+}
+
+#[test]
 fn icon_click_print_opens_print_prompt() {
     let mut app = App::new();
     click_slot(&mut app, 9);

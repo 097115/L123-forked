@@ -1259,6 +1259,7 @@ transcripts! {
     graph_render_legend => "graph_render_legend.tsv",
     graph_render_grid => "graph_render_grid.tsv",
     graph_render_frame => "graph_render_frame.tsv",
+    graph_render_orientation => "graph_render_orientation.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",

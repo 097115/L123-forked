@@ -76,7 +76,10 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
     // beneath the data without competing for visual weight.
     render_grid_lines(&def.options.grid, inner, buf);
     match def.graph_type {
-        GraphType::Bar => render_bar(vals, inner, buf),
+        GraphType::Bar => match def.features.orientation {
+            crate::Orientation::Vertical => render_bar(vals, inner, buf),
+            crate::Orientation::Horizontal => render_bar_horizontal(vals, inner, buf),
+        },
         GraphType::Line => render_line(vals, inner, buf),
         other => write_centered(
             inner,
@@ -397,6 +400,86 @@ fn render_bar(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// Half-block bar chart laid on its side. One ROW per A-series
+/// value; bar length grows from the left baseline rightward in
+/// proportion to the value. Half-cells at the right end use `▌`
+/// (LEFT HALF BLOCK), which fills the left half of the cell so the
+/// bar appears to stop mid-cell.
+fn render_bar_horizontal(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    let Some(series) = vals.first_series() else {
+        write_centered(area, buf, "No numeric A-series values to plot.");
+        return;
+    };
+    // Leave the left column for the baseline axis.
+    let plot_left = area.left().saturating_add(1);
+    let plot_right = area.right();
+    let plot_width = plot_right.saturating_sub(plot_left);
+    if plot_width < 2 || area.height < 2 || series.is_empty() {
+        return;
+    }
+    let max = series
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max = if max <= 0.0 || !max.is_finite() {
+        1.0
+    } else {
+        max
+    };
+
+    let bar_count = series.len() as u16;
+    let plot_height = area.height;
+    let step = (plot_height / bar_count).max(1);
+    let bar_height = step.saturating_sub(1).max(1);
+
+    let full = "█";
+    let half = "▌";
+    let style = Style::default().fg(Color::Cyan);
+
+    for (i, v) in series.iter().copied().enumerate() {
+        if !v.is_finite() || v <= 0.0 {
+            continue;
+        }
+        let y0 = area.top() + (i as u16) * step;
+        let length_halves = ((v / max) * plot_width as f64 * 2.0).round() as u16;
+        let full_cols = length_halves / 2;
+        let has_half = length_halves % 2 == 1;
+        for ry in 0..bar_height {
+            let y = y0 + ry;
+            if y >= area.bottom() {
+                break;
+            }
+            for col in 0..full_cols {
+                let x = plot_left + col;
+                if x >= plot_right {
+                    break;
+                }
+                let cell = &mut buf[(x, y)];
+                cell.set_symbol(full);
+                cell.set_style(style);
+            }
+            if has_half {
+                let x = plot_left + full_cols;
+                if x < plot_right {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_symbol(half);
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+    // Vertical baseline column of `│` on the left.
+    let baseline_x = area.left();
+    if baseline_x < area.right() {
+        for y in area.top()..area.bottom() {
+            let cell = &mut buf[(baseline_x, y)];
+            cell.set_symbol("│");
+            cell.set_style(Style::default().fg(Color::Gray));
+        }
+    }
+}
+
 /// Dot-per-sample line chart. Each A-series point is a `•` placed
 /// at its y-position. Spans the full plot width evenly regardless
 /// of how many samples there are.
@@ -452,6 +535,7 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GraphFeatures, Orientation};
 
     fn render_to(def: GraphType, a: Vec<f64>, w: u16, h: u16) -> Buffer {
         let area = Rect::new(0, 0, w, h);
@@ -484,6 +568,63 @@ mod tests {
         let buf = render_to(GraphType::Bar, vec![1.0, 2.0, 3.0], 40, 10);
         assert!(contains(&buf, "█"), "no █ in bar chart");
         assert!(contains(&buf, "─"), "no baseline");
+    }
+
+    #[test]
+    fn bar_horizontal_at_acceptance_size() {
+        // Mirror the acceptance harness: 80x30 buffer, body region
+        // is rows 3..29 (chunks[1] in App::render at SIZE 80 30).
+        let buf_area = Rect::new(0, 0, 80, 30);
+        let body_area = Rect::new(0, 3, 80, 26);
+        let mut buf = Buffer::empty(buf_area);
+        let mut vals = GraphValues::default();
+        vals.data[0] = Some(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            features: GraphFeatures {
+                orientation: Orientation::Horizontal,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        render(&def, &vals, body_area, &mut buf);
+        let mut got = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                got.push_str(buf[(x, y)].symbol());
+            }
+            got.push('\n');
+        }
+        assert!(
+            got.contains("▌"),
+            "no ▌ at acceptance size; rendered:\n{got}"
+        );
+    }
+
+    #[test]
+    fn bar_horizontal_renders_left_to_right() {
+        // Pick widths that guarantee a half-block at least once.
+        let area = Rect::new(0, 0, 41, 10);
+        let mut buf = Buffer::empty(area);
+        let mut vals = GraphValues::default();
+        vals.data[0] = Some(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            features: GraphFeatures {
+                orientation: Orientation::Horizontal,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        render(&def, &vals, area, &mut buf);
+        assert!(contains(&buf, "█"), "no █ full-block in horizontal bars");
+        assert!(
+            contains(&buf, "▌"),
+            "no ▌ half-block at the right end of a partial bar"
+        );
+        // Vertical baseline column from frame's left edge or the
+        // horizontal renderer's own `│` baseline.
+        assert!(contains(&buf, "│"), "no vertical baseline / frame edge");
     }
 
     #[test]

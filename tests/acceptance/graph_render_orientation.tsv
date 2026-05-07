@@ -1,0 +1,71 @@
+# /Graph F10 view — Bar orientation flips per features.orientation.
+#
+# Slice F5 of GRAPH_PLAN.md. Vertical (default) draws bars standing
+# up from a horizontal baseline at the bottom. Horizontal draws
+# bars lying on their side from a vertical baseline on the left.
+# Reference p. 2-194 — "Vert (Default) Displays the x-axis across
+# the bottom; Horiz Displays the x-axis along the left edge".
+
+SIZE 80 30
+
+# Seed A1..A5 = 1..5. Use DOWN (commit-and-advance) between values
+# so each cell actually receives its own number — bare ENTER commits
+# at the same cell and the next KEYS overwrites it.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+KEYS 5
+ENTER
+HOME
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+DOWN
+ENTER
+
+# Default Vertical. Frame already provides ─/│; the existing
+# F10 fixture (M7_graph_view_f10) covers the vertical-baseline
+# case, so we just confirm bars render.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+ESC
+
+# /GTFH — flip to Horizontal.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY H
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+# Half-block at the right end of partial bars.
+ASSERT_SCREEN     ▌
+ESC
+
+# /GTFV — back to Vertical.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY V
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+# Half-block at the top of partial bars (lower-half block).
+ASSERT_SCREEN     ▄
+ESC
+ASSERT_MODE       READY
