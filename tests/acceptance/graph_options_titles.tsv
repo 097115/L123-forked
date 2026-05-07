@@ -1,0 +1,111 @@
+# /Graph Options Titles — slice D2 of GRAPH_PLAN.md.
+#
+# Each leaf opens a single-line text prompt. Enter commits the buffer
+# into the matching slot of current_graph.options.titles; an empty
+# buffer clears it back to None. Reference p. 2-216,
+# 0100-graph-options-titles.html.
+
+SIZE 80 30
+
+# Default: every title unset.
+ASSERT_GRAPH_TITLE  First   none
+ASSERT_GRAPH_TITLE  Second  none
+ASSERT_GRAPH_TITLE  X       none
+ASSERT_GRAPH_TITLE  Y       none
+
+# /GOTF — set First.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY F
+KEYS Sales 1991
+ENTER
+ASSERT_MODE         READY
+ASSERT_GRAPH_TITLE  First   Sales 1991
+ASSERT_GRAPH_TITLE  Second  none
+
+# /GOTS — set Second.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY S
+KEYS by Quarter
+ENTER
+ASSERT_MODE         READY
+ASSERT_GRAPH_TITLE  First   Sales 1991
+ASSERT_GRAPH_TITLE  Second  by Quarter
+
+# /GOTX — set X-Axis.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY X
+KEYS Quarter
+ENTER
+ASSERT_GRAPH_TITLE  X       Quarter
+
+# /GOTY — set Y-Axis.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY Y
+KEYS Dollars
+ENTER
+ASSERT_GRAPH_TITLE  Y       Dollars
+
+# /GOT2 — set 2Y-Axis.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY 2
+KEYS Units
+ENTER
+ASSERT_GRAPH_TITLE  2Y      Units
+
+# /GOTN — set Note.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY N
+KEYS Source: Sloan
+ENTER
+ASSERT_GRAPH_TITLE  Note    Source: Sloan
+
+# /GOTO — set Other-Note.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY O
+KEYS Camera & Video
+ENTER
+ASSERT_GRAPH_TITLE  Other   Camera & Video
+
+# Re-enter the First prompt: it pre-fills with the current title; the
+# user clears the buffer and Enters, which removes the title.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY F
+# Pre-fill is "Sales 1991" (10 chars); BACKSPACE 10 times clears.
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+ENTER
+ASSERT_GRAPH_TITLE  First   none
+
+ASSERT_MODE         READY

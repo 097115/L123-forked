@@ -753,6 +753,12 @@ These behaviors are **not optional**. If any are missing, L123 fails promise 1
 11. **R3.4a WYSIWYG icon panel** visible on screen, with the 17-icon R3.4a
     layout and mouse activation — the most immediate visual marker that
     distinguishes R3.4a from R3.1.
+12. **`/Graph` Settings sheet** — pressing `/G` from READY overlays the
+    four-panel Graph Settings sheet (Graph Type, Data Ranges, Graph
+    Type Features, Options) and keeps it on screen for the duration of
+    the `/Graph` menu. Esc / Quit dismisses it back to READY.
+    See `docs/GRAPH_PLAN.md` for the slice-by-slice implementation
+    plan; Reference p. 2-230 is the source of truth for layout.
 
 These items are the acceptance checklist for MVP authenticity review.
 

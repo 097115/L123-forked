@@ -1,0 +1,75 @@
+# /Graph Options Grid — slice D3 (Grid portion) of GRAPH_PLAN.md.
+#
+# Per Reference p. 2-200 (0090-graph-options-grid.html):
+#   Horizontal → draw horizontal grid lines
+#   Vertical   → draw vertical grid lines
+#   Both       → draw both
+#   Clear      → remove all grid lines
+#   Y-Axis     → submenu (deferred to slice F; NotImplemented placeholder)
+#
+# The leaves are direct add-only actions; turning a single line off
+# requires Clear and re-adding the others.
+#
+# State asserted via ASSERT_GRAPH_GRID rather than ASSERT_SCREEN: the
+# orientation panel's "x Vertical" marker shares its substring with
+# the Grid Lines panel's "Vertical" row, so screen-substring search is
+# ambiguous.
+
+SIZE 80 30
+
+# Default: no grid lines.
+ASSERT_GRAPH_GRID  none
+
+# /GOGH — horizontal grid lines.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY H
+ASSERT_MODE        READY
+ASSERT_GRAPH_GRID  h
+
+# /GOGV — adds vertical (Horizontal stays).
+KEY /
+KEY G
+KEY O
+KEY G
+KEY V
+ASSERT_MODE        READY
+ASSERT_GRAPH_GRID  hv
+
+# /GOGC — clears every grid line.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY C
+ASSERT_MODE        READY
+ASSERT_GRAPH_GRID  none
+
+# /GOGB — turns both on at once.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY B
+ASSERT_MODE        READY
+ASSERT_GRAPH_GRID  hv
+
+# Bonus: confirm the panel reflects state too. Switch orientation to
+# Horizontal first so the orientation panel does not show "x Vertical"
+# and the Grid panel's "x Vertical" becomes substring-distinct.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY H
+ASSERT_MODE        READY
+KEY /
+KEY G
+ASSERT_SCREEN      x Horizontal
+ASSERT_SCREEN      x Vertical
+ESC
+ESC
+
+ASSERT_MODE        READY

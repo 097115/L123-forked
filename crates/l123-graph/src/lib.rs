@@ -50,6 +50,163 @@ pub enum Series {
     F,
 }
 
+/// `/Graph Type Features Vertical|Horizontal` — orientation of the
+/// independent axis. R3.1 Reference p. 2-194: Vertical is the default.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Orientation {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
+/// `/Graph Type Features {Y|2Y}-Ranges` — which y-axis a data series
+/// is plotted against. Default is the first y-axis.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum YAxis {
+    #[default]
+    First,
+    Second,
+}
+
+/// `/Graph Options Format` — how a series renders in line / mixed / XY
+/// / HLCO graphs. Reference p. 2-200, 0089-graph-options-format.html:
+/// "Both (Default)".
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum LineFormat {
+    Lines,
+    Symbols,
+    #[default]
+    Both,
+    Neither,
+    Area,
+}
+
+/// `/Graph Options Scale {Y|X|2Y} Automatic|Manual`. Slice D4 of the
+/// graph plan fleshes out the rest of the per-axis settings (lower,
+/// upper, format, indicator, type, exponent, width).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ScaleMode {
+    #[default]
+    Automatic,
+    Manual,
+}
+
+/// Which sides of a `/Graph Type Features Frame` are drawn.
+///
+/// 1-2-3 ships graphs with all four sides on (the user can clear any
+/// of them with `/Graph Type Features Frame {Side} No`); the manual
+/// `Default` impl below sets every flag to `true` to match.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FrameMask {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Default for FrameMask {
+    fn default() -> Self {
+        Self {
+            left: true,
+            right: true,
+            top: true,
+            bottom: true,
+        }
+    }
+}
+
+/// `/Graph Options Grid` — independent toggles for horizontal /
+/// vertical / y-axis grid lines. Default is no grid.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct GridMask {
+    pub horizontal: bool,
+    pub vertical: bool,
+    pub y_axis: bool,
+}
+
+/// `/Graph Options Titles` — the seven independently editable text
+/// strings that decorate a graph. Reference p. 2-216.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Titles {
+    pub first: Option<String>,
+    pub second: Option<String>,
+    pub x_axis: Option<String>,
+    pub y_axis: Option<String>,
+    pub two_y_axis: Option<String>,
+    pub note: Option<String>,
+    pub other_note: Option<String>,
+}
+
+/// `/Graph Options Scale {axis}` settings, per axis.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct ScaleAxis {
+    pub mode: ScaleMode,
+}
+
+/// `/Graph Options Advanced` — colors, hatch patterns, and text
+/// fonts/sizes. Empty placeholder for slice F of the graph plan; all
+/// the leaves under Advanced affect raster output only, not the
+/// settings panel.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Advanced {}
+
+/// `/Graph Type Features` — the ten orientation / stacking / framing
+/// flags exposed under the Features submenu. Reference pp. 2-194 →
+/// 2-198.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GraphFeatures {
+    pub orientation: Orientation,
+    pub stacked: bool,
+    pub percent: bool,
+    /// Which y-axis each of A..F plots against.
+    pub y_axis: [YAxis; 6],
+    pub frame: FrameMask,
+    pub drop_shadow: bool,
+    pub three_d: bool,
+    pub table: bool,
+}
+
+/// `/Graph Options` — everything reachable from the Options submenu.
+/// Reference pp. 2-200 → 2-218.
+///
+/// Manual `Default` impl below: `color = true` (color on, B&W off) and
+/// `skip = 1` (every x-axis label drawn). Every other field uses its
+/// type's derived default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphOptions {
+    pub legend: [Option<String>; 6],
+    pub format: [LineFormat; 6],
+    pub titles: Titles,
+    pub grid: GridMask,
+    pub scale_y: ScaleAxis,
+    pub scale_x: ScaleAxis,
+    pub scale_2y: ScaleAxis,
+    /// `/Graph Options Scale Skip` — every Nth x-axis label rendered.
+    pub skip: u32,
+    /// `true` = `/Graph Options Color`; `false` = `/Graph Options B&W`.
+    pub color: bool,
+    pub data_labels: [Option<Range>; 6],
+    pub advanced: Advanced,
+}
+
+impl Default for GraphOptions {
+    fn default() -> Self {
+        Self {
+            legend: Default::default(),
+            format: Default::default(),
+            titles: Titles::default(),
+            grid: GridMask::default(),
+            scale_y: ScaleAxis::default(),
+            scale_x: ScaleAxis::default(),
+            scale_2y: ScaleAxis::default(),
+            skip: 1,
+            color: true,
+            data_labels: Default::default(),
+            advanced: Advanced::default(),
+        }
+    }
+}
+
 /// All state that makes up a single graph definition.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct GraphDef {
@@ -57,6 +214,8 @@ pub struct GraphDef {
     pub x: Option<Range>,
     /// Data series A..F in positional order.
     pub data: [Option<Range>; 6],
+    pub features: GraphFeatures,
+    pub options: GraphOptions,
 }
 
 impl GraphDef {
@@ -97,10 +256,23 @@ impl GraphDef {
         }
     }
 
-    /// Equivalent to `/Graph Reset Graph`: clear every range and return
-    /// the type to the default.
+    /// Equivalent to `/Graph Reset Graph`: clear every range, every
+    /// feature, and every option, and return the type to the default.
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Equivalent to `/Graph Reset Ranges`: clear X and A..F, leave
+    /// `graph_type`, `features`, and `options` alone.
+    pub fn reset_ranges(&mut self) {
+        self.x = None;
+        self.data = Default::default();
+    }
+
+    /// Equivalent to `/Graph Reset Options`: restore `options` to its
+    /// default. Ranges, type, and Type Features are preserved.
+    pub fn reset_options(&mut self) {
+        self.options = GraphOptions::default();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -214,5 +386,138 @@ mod tests {
         m.insert("sales_q2".into(), GraphDef::default());
         let keys: Vec<&String> = m.keys().collect();
         assert_eq!(keys, vec!["sales_q1", "sales_q2", "sales_q4"]);
+    }
+
+    #[test]
+    fn features_default_matches_reference_p_2_194() {
+        let f = GraphFeatures::default();
+        assert_eq!(f.orientation, Orientation::Vertical);
+        assert!(!f.stacked);
+        assert!(!f.percent);
+        assert_eq!(f.y_axis, [YAxis::First; 6]);
+        assert!(!f.drop_shadow);
+        assert!(!f.three_d);
+        assert!(!f.table);
+    }
+
+    #[test]
+    fn frame_default_has_all_four_sides_on() {
+        let frame = FrameMask::default();
+        assert!(frame.left);
+        assert!(frame.right);
+        assert!(frame.top);
+        assert!(frame.bottom);
+    }
+
+    #[test]
+    fn grid_default_has_no_lines() {
+        let g = GridMask::default();
+        assert!(!g.horizontal);
+        assert!(!g.vertical);
+        assert!(!g.y_axis);
+    }
+
+    #[test]
+    fn options_default_color_on_skip_one_no_titles_no_grid() {
+        let o = GraphOptions::default();
+        assert!(o.color, "Reference default is /Graph Options Color");
+        assert_eq!(o.skip, 1, "every x-axis label drawn by default");
+        assert_eq!(o.scale_y.mode, ScaleMode::Automatic);
+        assert_eq!(o.scale_x.mode, ScaleMode::Automatic);
+        assert_eq!(o.scale_2y.mode, ScaleMode::Automatic);
+        assert_eq!(o.titles, Titles::default());
+        assert_eq!(o.grid, GridMask::default());
+        assert!(o.legend.iter().all(Option::is_none));
+        assert!(o.data_labels.iter().all(Option::is_none));
+        assert_eq!(
+            o.format,
+            [LineFormat::Both; 6],
+            "Reference default is Both (lines + symbols)"
+        );
+    }
+
+    #[test]
+    fn graph_def_carries_features_and_options() {
+        let g = GraphDef::default();
+        assert_eq!(g.features, GraphFeatures::default());
+        assert_eq!(g.options, GraphOptions::default());
+    }
+
+    #[test]
+    fn reset_ranges_clears_x_and_a_through_f_only() {
+        let mut g = GraphDef {
+            graph_type: GraphType::Bar,
+            features: GraphFeatures {
+                orientation: Orientation::Horizontal,
+                ..Default::default()
+            },
+            options: GraphOptions {
+                color: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        g.set(Series::X, r(0, 0, 0, 5));
+        g.set(Series::A, r(1, 0, 1, 5));
+        g.set(Series::F, r(5, 0, 5, 5));
+
+        g.reset_ranges();
+
+        assert!(g.is_empty(), "ranges cleared");
+        assert_eq!(g.graph_type, GraphType::Bar, "graph_type preserved");
+        assert_eq!(
+            g.features.orientation,
+            Orientation::Horizontal,
+            "features preserved"
+        );
+        assert!(!g.options.color, "options preserved");
+    }
+
+    #[test]
+    fn reset_options_clears_options_only() {
+        let mut g = GraphDef {
+            graph_type: GraphType::Bar,
+            features: GraphFeatures {
+                orientation: Orientation::Horizontal,
+                ..Default::default()
+            },
+            options: GraphOptions {
+                color: false,
+                skip: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        g.set(Series::A, r(1, 0, 1, 5));
+
+        g.reset_options();
+
+        assert_eq!(g.options, GraphOptions::default(), "options reset");
+        assert_eq!(g.graph_type, GraphType::Bar, "graph_type preserved");
+        assert_eq!(
+            g.features.orientation,
+            Orientation::Horizontal,
+            "features preserved"
+        );
+        assert_eq!(g.get(Series::A), Some(r(1, 0, 1, 5)), "ranges preserved");
+    }
+
+    #[test]
+    fn reset_clears_features_and_options_too() {
+        let mut g = GraphDef {
+            graph_type: GraphType::Bar,
+            features: GraphFeatures {
+                orientation: Orientation::Horizontal,
+                three_d: true,
+                ..Default::default()
+            },
+            options: GraphOptions {
+                color: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        g.reset();
+        assert_eq!(g, GraphDef::default());
     }
 }

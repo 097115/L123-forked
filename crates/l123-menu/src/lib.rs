@@ -516,6 +516,159 @@ pub enum Action {
     /// `/Graph Quit` — close the `/Graph` menu back to READY.
     GraphQuit,
 
+    // ---- /Graph Type Features (slice C1: orientation + boolean flags) --
+    GraphFeaturesVertical,
+    GraphFeaturesHorizontal,
+    GraphFeaturesStackedYes,
+    GraphFeaturesStackedNo,
+    GraphFeaturesPercentYes,
+    GraphFeaturesPercentNo,
+    GraphFeaturesDropShadowYes,
+    GraphFeaturesDropShadowNo,
+    GraphFeaturesThreeDYes,
+    GraphFeaturesThreeDNo,
+    GraphFeaturesTableYes,
+    GraphFeaturesTableNo,
+    /// `/Graph Type Features Quit` — return to `/Graph Type` menu.
+    /// Reused by the 2Y-Ranges, Y-Ranges, and Frame submenus' Quit
+    /// leaves: each just pops one menu level.
+    GraphFeaturesQuit,
+
+    // ---- /Graph Type Features 2Y-Ranges and Y-Ranges (slice C2) -------
+    GraphFeatures2YGraph,
+    GraphFeatures2YA,
+    GraphFeatures2YB,
+    GraphFeatures2YC,
+    GraphFeatures2YD,
+    GraphFeatures2YE,
+    GraphFeatures2YF,
+    GraphFeaturesYGraph,
+    GraphFeaturesYA,
+    GraphFeaturesYB,
+    GraphFeaturesYC,
+    GraphFeaturesYD,
+    GraphFeaturesYE,
+    GraphFeaturesYF,
+
+    // ---- /Graph Type Features Frame (slice C2) ------------------------
+    GraphFeaturesFrameLeftYes,
+    GraphFeaturesFrameLeftNo,
+    GraphFeaturesFrameRightYes,
+    GraphFeaturesFrameRightNo,
+    GraphFeaturesFrameTopYes,
+    GraphFeaturesFrameTopNo,
+    GraphFeaturesFrameBottomYes,
+    GraphFeaturesFrameBottomNo,
+    /// `/Graph Type Features Frame All` — turn every frame side on.
+    GraphFeaturesFrameAll,
+    /// `/Graph Type Features Frame Clear` — turn every frame side off.
+    GraphFeaturesFrameClear,
+
+    // ---- /Graph Options (slice D of GRAPH_PLAN.md) -------------------
+    /// `/Graph Options Color` — render the graph with colored series.
+    GraphOptionsColor,
+    /// `/Graph Options B&W` — render the graph in black and white.
+    GraphOptionsBW,
+    /// `/Graph Options Quit` — return to `/Graph` menu.
+    GraphOptionsQuit,
+    /// `/Graph Options Grid Horizontal` — turn on horizontal grid lines.
+    GraphOptionsGridHorizontal,
+    /// `/Graph Options Grid Vertical` — turn on vertical grid lines.
+    GraphOptionsGridVertical,
+    /// `/Graph Options Grid Both` — turn on horizontal and vertical
+    /// grid lines together.
+    GraphOptionsGridBoth,
+    /// `/Graph Options Grid Clear` — remove every grid line.
+    GraphOptionsGridClear,
+
+    // ---- /Graph Options Format (slice D Format portion) ---------------
+    // Per-series + Graph-wide × five LineFormat values. The `Graph`
+    // slot applies the chosen format to all six A..F series at once.
+    GraphFormatGraphLines,
+    GraphFormatGraphSymbols,
+    GraphFormatGraphBoth,
+    GraphFormatGraphNeither,
+    GraphFormatGraphArea,
+    GraphFormatALines,
+    GraphFormatASymbols,
+    GraphFormatABoth,
+    GraphFormatANeither,
+    GraphFormatAArea,
+    GraphFormatBLines,
+    GraphFormatBSymbols,
+    GraphFormatBBoth,
+    GraphFormatBNeither,
+    GraphFormatBArea,
+    GraphFormatCLines,
+    GraphFormatCSymbols,
+    GraphFormatCBoth,
+    GraphFormatCNeither,
+    GraphFormatCArea,
+    GraphFormatDLines,
+    GraphFormatDSymbols,
+    GraphFormatDBoth,
+    GraphFormatDNeither,
+    GraphFormatDArea,
+    GraphFormatELines,
+    GraphFormatESymbols,
+    GraphFormatEBoth,
+    GraphFormatENeither,
+    GraphFormatEArea,
+    GraphFormatFLines,
+    GraphFormatFSymbols,
+    GraphFormatFBoth,
+    GraphFormatFNeither,
+    GraphFormatFArea,
+
+    // ---- /Graph Options Titles (slice D Titles portion) --------------
+    /// `/Graph Options Titles First` — first (top) graph title line.
+    GraphOptionsTitleFirst,
+    /// `/Graph Options Titles Second` — second (subtitle) line.
+    GraphOptionsTitleSecond,
+    /// `/Graph Options Titles X-Axis` — x-axis caption.
+    GraphOptionsTitleXAxis,
+    /// `/Graph Options Titles Y-Axis` — first y-axis caption.
+    GraphOptionsTitleYAxis,
+    /// `/Graph Options Titles 2Y-Axis` — second y-axis caption.
+    GraphOptionsTitle2YAxis,
+    /// `/Graph Options Titles Note` — bottom-left footnote.
+    GraphOptionsTitleNote,
+    /// `/Graph Options Titles Other-Note` — bottom-right footnote.
+    GraphOptionsTitleOtherNote,
+
+    // ---- /Graph Options Legend (slice D Legend portion) --------------
+    /// `/Graph Options Legend A` — text prompt for the A series legend.
+    GraphOptionsLegendA,
+    GraphOptionsLegendB,
+    GraphOptionsLegendC,
+    GraphOptionsLegendD,
+    GraphOptionsLegendE,
+    GraphOptionsLegendF,
+
+    // ---- /Graph Options Data-Labels (slice D Data-Labels portion) ---
+    /// `/Graph Options Data-Labels A` — POINT prompt; commit stores
+    /// the range in `current_graph.options.data_labels[0]`.
+    GraphOptionsDataLabelsA,
+    GraphOptionsDataLabelsB,
+    GraphOptionsDataLabelsC,
+    GraphOptionsDataLabelsD,
+    GraphOptionsDataLabelsE,
+    GraphOptionsDataLabelsF,
+
+    // ---- /Graph Options Scale (slice D Scale portion) ----------------
+    // Per-axis Auto/Manual mode, plus the global Skip prompt.
+    // Lower/Upper/Format/Indicator/Type/Exponent/Width need extra
+    // ScaleAxis fields and stay NotImplemented for now.
+    GraphOptionsScaleYAuto,
+    GraphOptionsScaleYManual,
+    GraphOptionsScaleXAuto,
+    GraphOptionsScaleXManual,
+    GraphOptionsScale2YAuto,
+    GraphOptionsScale2YManual,
+    /// `/Graph Options Scale Skip` — numeric prompt; commit sets
+    /// `current_graph.options.skip` to the new value (clamped 1..=8192).
+    GraphOptionsScaleSkip,
+
     // ---- WYSIWYG (`:`) colon-menu commands -----------------------------
     /// `:Format Bold Set` — apply bold to a range.
     FormatBoldSet,
@@ -3500,6 +3653,426 @@ const PRINT_MENU: &[MenuItem] = &[
     },
 ];
 
+// /Graph Type Features Yes|No submenus. Letter accelerator order
+// matches Lotus muscle memory: No before Yes.
+
+const GTF_STACKED_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Do not stack data ranges",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesStackedNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Stack data ranges",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesStackedYes),
+    },
+];
+
+const GTF_PERCENT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Plot absolute values",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesPercentNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Plot values as percentages of their column total",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesPercentYes),
+    },
+];
+
+const GTF_DROP_SHADOW_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Remove drop-shadow",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesDropShadowNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Add drop-shadow",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesDropShadowYes),
+    },
+];
+
+const GTF_THREE_D_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Plot in 2-D",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesThreeDNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Plot in 3-D",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesThreeDYes),
+    },
+];
+
+const GTF_TABLE_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide value table",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesTableNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show value table below the graph",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesTableYes),
+    },
+];
+
+// 2Y-Ranges — assign series to the second y-axis.
+const GTF_2Y_RANGES_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'G',
+        name: "Graph",
+        help: "Assign every data range to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YGraph),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "A",
+        help: "Assign A to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YA),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B",
+        help: "Assign B to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YB),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "C",
+        help: "Assign C to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YC),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "D",
+        help: "Assign D to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YD),
+    },
+    MenuItem {
+        letter: 'E',
+        name: "E",
+        help: "Assign E to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YE),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "F",
+        help: "Assign F to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeatures2YF),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Type Features",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesQuit),
+    },
+];
+
+// Y-Ranges — reassign series back to the first y-axis.
+const GTF_Y_RANGES_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'G',
+        name: "Graph",
+        help: "Reassign every data range to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYGraph),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "A",
+        help: "Reassign A to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYA),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B",
+        help: "Reassign B to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYB),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "C",
+        help: "Reassign C to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYC),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "D",
+        help: "Reassign D to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYD),
+    },
+    MenuItem {
+        letter: 'E',
+        name: "E",
+        help: "Reassign E to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYE),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "F",
+        help: "Reassign F to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesYF),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Type Features",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesQuit),
+    },
+];
+
+// Frame side Yes/No submenus.
+const GTF_FRAME_LEFT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the left frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameLeftNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the left frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameLeftYes),
+    },
+];
+
+const GTF_FRAME_RIGHT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the right frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameRightNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the right frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameRightYes),
+    },
+];
+
+const GTF_FRAME_TOP_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the top frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameTopNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the top frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameTopYes),
+    },
+];
+
+const GTF_FRAME_BOTTOM_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the bottom frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameBottomNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the bottom frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameBottomYes),
+    },
+];
+
+const GTF_FRAME_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'L',
+        name: "Left",
+        help: "Toggle the left frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_FRAME_LEFT_MENU),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Right",
+        help: "Toggle the right frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_FRAME_RIGHT_MENU),
+    },
+    MenuItem {
+        letter: 'T',
+        name: "Top",
+        help: "Toggle the top frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_FRAME_TOP_MENU),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "Bottom",
+        help: "Toggle the bottom frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_FRAME_BOTTOM_MENU),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "All",
+        help: "Show every frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameAll),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "Clear",
+        help: "Hide every frame edge",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameClear),
+    },
+    // The Y-Axis frame line is conceptually distinct from the four
+    // outer edges and the panel does not yet have a row for it.
+    // Slice F flesh-out lands the model field; until then the leaf
+    // sits in the menu tree as a stub for muscle memory.
+    MenuItem {
+        letter: 'Y',
+        name: "Y-Axis",
+        help: "Toggle the inner y-axis line",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::NotImplemented("gtf-frame-y-axis"),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Type Features",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesQuit),
+    },
+];
+
+const GRAPH_TYPE_FEATURES_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'V',
+        name: "Vertical",
+        help: "X-axis at bottom, y-axes on left and right (default)",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesVertical),
+    },
+    MenuItem {
+        letter: 'H',
+        name: "Horizontal",
+        help: "X-axis at left, y-axes top and bottom",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Action(Action::GraphFeaturesHorizontal),
+    },
+    MenuItem {
+        letter: 'S',
+        name: "Stacked",
+        help: "Stack data ranges (line/bar/mixed/XY)",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Submenu(GTF_STACKED_MENU),
+    },
+    MenuItem {
+        letter: '1',
+        name: "100%",
+        help: "Plot data ranges as percentages of their total",
+        help_page: "0064-graph-type-features.html",
+        body: MenuBody::Submenu(GTF_PERCENT_MENU),
+    },
+    MenuItem {
+        letter: '2',
+        name: "2Y-Ranges",
+        help: "Assign data ranges to the second y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_2Y_RANGES_MENU),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Y-Ranges",
+        help: "Reassign data ranges to the first y-axis",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_Y_RANGES_MENU),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "Frame",
+        help: "Toggle the graph frame edges",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_FRAME_MENU),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "Drop-Shadow",
+        help: "Add or remove drop-shadow",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_DROP_SHADOW_MENU),
+    },
+    MenuItem {
+        letter: '3',
+        name: "3-D",
+        help: "Display the graph in 3-D",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_THREE_D_MENU),
+    },
+    MenuItem {
+        letter: 'T',
+        name: "Table",
+        help: "Show a value table below the graph",
+        help_page: "0066-graph-type-features-continued.html",
+        body: MenuBody::Submenu(GTF_TABLE_MENU),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Type",
+        help_page: "0060-graph-type.html",
+        body: MenuBody::Action(Action::GraphFeaturesQuit),
+    },
+];
+
 const GRAPH_TYPE_MENU: &[MenuItem] = &[
     MenuItem {
         letter: 'L',
@@ -3553,9 +4126,668 @@ const GRAPH_TYPE_MENU: &[MenuItem] = &[
     MenuItem {
         letter: 'F',
         name: "Features",
-        help: "Type features (stacked, 100%, 2Y, Y-ranges)",
+        help: "Type features (orientation, stacked, 100%, frame, 3-D, …)",
         help_page: "0064-graph-type-features.html",
-        body: MenuBody::NotImplemented("gt-features"),
+        body: MenuBody::Submenu(GRAPH_TYPE_FEATURES_MENU),
+    },
+];
+
+// /Graph Options Advanced — Reference p. 2-200,
+// 0078-graph-options-advanced.html. Affects raster output only and
+// needs data-model fields not present today; this menu is wired as a
+// navigable shell so the tree is traversable, with each leaf
+// surfacing a NotImplemented tag until slice F lands the model.
+const GO_ADVANCED_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'C',
+        name: "Colors",
+        help: "Per-series colors / Hide / Range",
+        help_page: "0079-graph-options-advanced-colors-sets-colors-for-or-hides-the-a-f-data.html",
+        body: MenuBody::NotImplemented("goa-colors"),
+    },
+    MenuItem {
+        letter: 'H',
+        name: "Hatches",
+        help: "Per-series hatch patterns",
+        help_page: "0081-graph-options-advanced-hatches.html",
+        body: MenuBody::NotImplemented("goa-hatches"),
+    },
+    MenuItem {
+        letter: 'T',
+        name: "Text",
+        help: "Color, font, and size for graph text",
+        help_page: "0083-graph-options-advanced-text.html",
+        body: MenuBody::NotImplemented("goa-text"),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Options",
+        help_page: "0077-graph-options.html",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+// /Graph Options Scale {Y|X|2Y}-Scale — per-axis settings. Reference
+// p. 2-206 (0093-graph-options-scale-continued.html). Auto and Manual
+// drive `ScaleAxis::mode`; the rest are stubs until the model carries
+// `lower`, `upper`, `format`, `indicator`, `type_`, `exponent`, and
+// `width` fields.
+macro_rules! gos_axis_menu {
+    ($auto:expr, $manual:expr, $lower:literal, $upper:literal, $format:literal,
+     $indicator:literal, $type_:literal, $exponent:literal, $width:literal) => {
+        &[
+            MenuItem {
+                letter: 'A',
+                name: "Automatic",
+                help: "Compute scale limits from the data (default)",
+                help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
+                body: MenuBody::Action($auto),
+            },
+            MenuItem {
+                letter: 'M',
+                name: "Manual",
+                help: "Use the manually-set lower and upper limits",
+                help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
+                body: MenuBody::Action($manual),
+            },
+            MenuItem {
+                letter: 'L',
+                name: "Lower",
+                help: "Manual lower limit",
+                help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
+                body: MenuBody::NotImplemented($lower),
+            },
+            MenuItem {
+                letter: 'U',
+                name: "Upper",
+                help: "Manual upper limit",
+                help_page: "0094-graph-options-scale-y-x-2y-automatic-manual-lower-or-upper.html",
+                body: MenuBody::NotImplemented($upper),
+            },
+            MenuItem {
+                letter: 'F',
+                name: "Format",
+                help: "Number format for scale labels",
+                help_page: "0096-graph-options-scale-y-scale-x-scale-2y-scale-format.html",
+                body: MenuBody::NotImplemented($format),
+            },
+            MenuItem {
+                letter: 'I',
+                name: "Indicator",
+                help: "Scale indicator (Yes/No/Manual)",
+                help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+                body: MenuBody::NotImplemented($indicator),
+            },
+            MenuItem {
+                letter: 'T',
+                name: "Type",
+                help: "Linear or logarithmic scale",
+                help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+                body: MenuBody::NotImplemented($type_),
+            },
+            MenuItem {
+                letter: 'E',
+                name: "Exponent",
+                help: "Order-of-magnitude shift",
+                help_page: "0095-graph-options-scale-y-scale-x-scale-2y-scale-exponent.html",
+                body: MenuBody::NotImplemented($exponent),
+            },
+            MenuItem {
+                letter: 'W',
+                name: "Width",
+                help: "Maximum width of scale labels",
+                help_page: "0099-graph-options-scale-y-scale-x-scale-2y-scale-width.html",
+                body: MenuBody::NotImplemented($width),
+            },
+            MenuItem {
+                letter: 'Q',
+                name: "Quit",
+                help: "Return to /Graph Options Scale",
+                help_page: "0092-graph-options-scale.html",
+                body: MenuBody::Action(Action::GraphOptionsQuit),
+            },
+        ]
+    };
+}
+
+const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
+    Action::GraphOptionsScaleYAuto,
+    Action::GraphOptionsScaleYManual,
+    "gosy-lower",
+    "gosy-upper",
+    "gosy-format",
+    "gosy-indicator",
+    "gosy-type",
+    "gosy-exponent",
+    "gosy-width"
+);
+const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
+    Action::GraphOptionsScaleXAuto,
+    Action::GraphOptionsScaleXManual,
+    "gosx-lower",
+    "gosx-upper",
+    "gosx-format",
+    "gosx-indicator",
+    "gosx-type",
+    "gosx-exponent",
+    "gosx-width"
+);
+const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
+    Action::GraphOptionsScale2YAuto,
+    Action::GraphOptionsScale2YManual,
+    "gos2-lower",
+    "gos2-upper",
+    "gos2-format",
+    "gos2-indicator",
+    "gos2-type",
+    "gos2-exponent",
+    "gos2-width"
+);
+
+const GO_SCALE_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'Y',
+        name: "Y-Scale",
+        help: "First y-axis scaling",
+        help_page: "0092-graph-options-scale.html",
+        body: MenuBody::Submenu(GO_SCALE_Y_MENU),
+    },
+    MenuItem {
+        letter: 'X',
+        name: "X-Scale",
+        help: "X-axis scaling (XY graphs)",
+        help_page: "0092-graph-options-scale.html",
+        body: MenuBody::Submenu(GO_SCALE_X_MENU),
+    },
+    MenuItem {
+        letter: '2',
+        name: "2Y-Scale",
+        help: "Second y-axis scaling",
+        help_page: "0092-graph-options-scale.html",
+        body: MenuBody::Submenu(GO_SCALE_2Y_MENU),
+    },
+    MenuItem {
+        letter: 'S',
+        name: "Skip",
+        help: "Every Nth x-axis label",
+        help_page: "0092-graph-options-scale.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleSkip),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Options",
+        help_page: "0077-graph-options.html",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+// /Graph Options Data-Labels — Reference p. 2-204,
+// 0088-graph-options-data-labels.html. A-F leaves enter POINT mode for
+// the data-label range. Group (Columnwise/Rowwise) and the placement
+// follow-up (Center/Left/Above/Right/Below) are deferred.
+const GO_DATA_LABELS_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'A',
+        name: "A",
+        help: "Data labels for the A range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsA),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B",
+        help: "Data labels for the B range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsB),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "C",
+        help: "Data labels for the C range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsC),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "D",
+        help: "Data labels for the D range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsD),
+    },
+    MenuItem {
+        letter: 'E',
+        name: "E",
+        help: "Data labels for the E range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsE),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "F",
+        help: "Data labels for the F range",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsF),
+    },
+    MenuItem {
+        letter: 'G',
+        name: "Group",
+        help: "Distribute one range across A-F",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::NotImplemented("god-group"),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Options",
+        help_page: "0077-graph-options.html",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+// /Graph Options Legend — Reference p. 2-200, 0091-graph-options-legend.html.
+// A-F leaves open per-series text prompts; the Range leaf points at a
+// worksheet range whose cell values are read into the six legend
+// slots in order. Range is deferred (slice F).
+const GO_LEGEND_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'A',
+        name: "A",
+        help: "Legend for the A data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendA),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B",
+        help: "Legend for the B data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendB),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "C",
+        help: "Legend for the C data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendC),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "D",
+        help: "Legend for the D data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendD),
+    },
+    MenuItem {
+        letter: 'E',
+        name: "E",
+        help: "Legend for the E data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendE),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "F",
+        help: "Legend for the F data range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Action(Action::GraphOptionsLegendF),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Range",
+        help: "Read legends from a worksheet range",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::NotImplemented("gol-range"),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Options",
+        help_page: "0077-graph-options.html",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+// /Graph Options Titles — Reference p. 2-216, 0100-graph-options-titles.html.
+// Each leaf opens a single-line text prompt; the committed buffer
+// replaces the matching slot in `current_graph.options.titles` (or
+// clears it if the buffer is empty).
+const GO_TITLES_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'F',
+        name: "First",
+        help: "First (top) line of graph title",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleFirst),
+    },
+    MenuItem {
+        letter: 'S',
+        name: "Second",
+        help: "Second (subtitle) line",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleSecond),
+    },
+    MenuItem {
+        letter: 'X',
+        name: "X-Axis",
+        help: "Caption beneath the x-axis",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleXAxis),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Y-Axis",
+        help: "Caption alongside the first y-axis",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleYAxis),
+    },
+    MenuItem {
+        letter: '2',
+        name: "2Y-Axis",
+        help: "Caption alongside the second y-axis",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitle2YAxis),
+    },
+    MenuItem {
+        letter: 'N',
+        name: "Note",
+        help: "Bottom-left footnote",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleNote),
+    },
+    MenuItem {
+        letter: 'O',
+        name: "Other-Note",
+        help: "Bottom-right footnote",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Action(Action::GraphOptionsTitleOtherNote),
+    },
+];
+
+// /Graph Options Format value submenus — one per series (and one for
+// "Graph" = all six). Each carries the same five values (Lines /
+// Symbols / Both / Neither / Area) and a Quit that pops back to the
+// /GOF entry point. Reference p. 2-200, 0089-graph-options-format.html.
+
+macro_rules! gof_value_menu {
+    ($lines:expr, $symbols:expr, $both:expr, $neither:expr, $area:expr) => {
+        &[
+            MenuItem {
+                letter: 'L',
+                name: "Lines",
+                help: "Connecting lines only",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action($lines),
+            },
+            MenuItem {
+                letter: 'S',
+                name: "Symbols",
+                help: "Symbols at each data point",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action($symbols),
+            },
+            MenuItem {
+                letter: 'B',
+                name: "Both",
+                help: "Lines and symbols (default)",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action($both),
+            },
+            MenuItem {
+                letter: 'N',
+                name: "Neither",
+                help: "Hide both lines and symbols",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action($neither),
+            },
+            MenuItem {
+                letter: 'A',
+                name: "Area",
+                help: "Fill area below the line",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action($area),
+            },
+            MenuItem {
+                letter: 'Q',
+                name: "Quit",
+                help: "Return to /Graph Options Format",
+                help_page: "0089-graph-options-format.html",
+                body: MenuBody::Action(Action::GraphOptionsQuit),
+            },
+        ]
+    };
+}
+
+const GO_FORMAT_GRAPH_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatGraphLines,
+    Action::GraphFormatGraphSymbols,
+    Action::GraphFormatGraphBoth,
+    Action::GraphFormatGraphNeither,
+    Action::GraphFormatGraphArea
+);
+const GO_FORMAT_A_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatALines,
+    Action::GraphFormatASymbols,
+    Action::GraphFormatABoth,
+    Action::GraphFormatANeither,
+    Action::GraphFormatAArea
+);
+const GO_FORMAT_B_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatBLines,
+    Action::GraphFormatBSymbols,
+    Action::GraphFormatBBoth,
+    Action::GraphFormatBNeither,
+    Action::GraphFormatBArea
+);
+const GO_FORMAT_C_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatCLines,
+    Action::GraphFormatCSymbols,
+    Action::GraphFormatCBoth,
+    Action::GraphFormatCNeither,
+    Action::GraphFormatCArea
+);
+const GO_FORMAT_D_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatDLines,
+    Action::GraphFormatDSymbols,
+    Action::GraphFormatDBoth,
+    Action::GraphFormatDNeither,
+    Action::GraphFormatDArea
+);
+const GO_FORMAT_E_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatELines,
+    Action::GraphFormatESymbols,
+    Action::GraphFormatEBoth,
+    Action::GraphFormatENeither,
+    Action::GraphFormatEArea
+);
+const GO_FORMAT_F_VALUES_MENU: &[MenuItem] = gof_value_menu!(
+    Action::GraphFormatFLines,
+    Action::GraphFormatFSymbols,
+    Action::GraphFormatFBoth,
+    Action::GraphFormatFNeither,
+    Action::GraphFormatFArea
+);
+
+const GO_FORMAT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'G',
+        name: "Graph",
+        help: "Format every data range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_GRAPH_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "A",
+        help: "Format the A range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_A_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B",
+        help: "Format the B range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_B_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "C",
+        help: "Format the C range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_C_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "D",
+        help: "Format the D range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_D_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'E',
+        name: "E",
+        help: "Format the E range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_E_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "F",
+        help: "Format the F range",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_F_VALUES_MENU),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph Options",
+        help_page: "0077-graph-options.html",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+// /Graph Options Grid — direct add-only actions per Reference p. 2-200
+// (0090-graph-options-grid.html). Single sides cannot be removed
+// individually; use Clear and re-add.
+const GO_GRID_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'H',
+        name: "Horizontal",
+        help: "Add horizontal grid lines",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridHorizontal),
+    },
+    MenuItem {
+        letter: 'V',
+        name: "Vertical",
+        help: "Add vertical grid lines",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridVertical),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "Both",
+        help: "Add horizontal and vertical grid lines",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridBoth),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "Clear",
+        help: "Remove every grid line",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Action(Action::GraphOptionsGridClear),
+    },
+    // Y-Axis sub-tree (Y / 2Y / Both — origin axis for horizontal
+    // grids) is deferred until the data model carries the second
+    // y-axis grid bool. Slice F flesh-out.
+    MenuItem {
+        letter: 'Y',
+        name: "Y-Axis",
+        help: "Choose which y-axis horizontal grids originate from",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::NotImplemented("gog-y-axis"),
+    },
+];
+
+// /Graph Options — Reference p. 2-200 (0077-graph-options.html). Slice
+// D of GRAPH_PLAN.md fills these in over several sub-slices; D1 wires
+// Color and B&W as the smallest meaningful pair. The remaining leaves
+// (Legend, Format, Titles, Grid, Scale, Data-Labels, Advanced) sit as
+// NotImplemented stubs so the menu shape is complete and muscle-memory
+// works today.
+const GRAPH_OPTIONS_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'L',
+        name: "Legend",
+        help: "Set per-series legend text",
+        help_page: "0091-graph-options-legend.html",
+        body: MenuBody::Submenu(GO_LEGEND_MENU),
+    },
+    MenuItem {
+        letter: 'F',
+        name: "Format",
+        help: "Lines / Symbols / Both / Neither / Area",
+        help_page: "0089-graph-options-format.html",
+        body: MenuBody::Submenu(GO_FORMAT_MENU),
+    },
+    MenuItem {
+        letter: 'T',
+        name: "Titles",
+        help: "Graph, axis, and footnote titles",
+        help_page: "0100-graph-options-titles.html",
+        body: MenuBody::Submenu(GO_TITLES_MENU),
+    },
+    MenuItem {
+        letter: 'G',
+        name: "Grid",
+        help: "Horizontal / Vertical / Y-Axis grid lines",
+        help_page: "0090-graph-options-grid.html",
+        body: MenuBody::Submenu(GO_GRID_MENU),
+    },
+    MenuItem {
+        letter: 'S',
+        name: "Scale",
+        help: "Y / X / 2Y axis scaling",
+        help_page: "0092-graph-options-scale.html",
+        body: MenuBody::Submenu(GO_SCALE_MENU),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "Color",
+        help: "Render graph in color",
+        help_page: "0087-graph-options-color-and-graph-options-b-w.html",
+        body: MenuBody::Action(Action::GraphOptionsColor),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "B&W",
+        help: "Render graph in black and white",
+        help_page: "0087-graph-options-color-and-graph-options-b-w.html",
+        body: MenuBody::Action(Action::GraphOptionsBW),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "Data-Labels",
+        help: "Per-series data labels",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Submenu(GO_DATA_LABELS_MENU),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "Advanced",
+        help: "Colors, hatches, fonts, and text sizes",
+        help_page: "0078-graph-options-advanced.html",
+        body: MenuBody::Submenu(GO_ADVANCED_MENU),
+    },
+    MenuItem {
+        letter: 'Q',
+        name: "Quit",
+        help: "Return to /Graph",
+        help_page: "",
+        body: MenuBody::Action(Action::GraphOptionsQuit),
     },
 ];
 
@@ -3722,7 +4954,7 @@ const GRAPH_MENU: &[MenuItem] = &[
         name: "Options",
         help: "Legend, Titles, Grid, Scale, Color, …",
         help_page: "0077-graph-options.html",
-        body: MenuBody::NotImplemented("g-options"),
+        body: MenuBody::Submenu(GRAPH_OPTIONS_MENU),
     },
     MenuItem {
         letter: 'N',

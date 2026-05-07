@@ -1,0 +1,153 @@
+# /Graph Type Features — slice C2 of GRAPH_PLAN.md.
+#
+# 2Y-Ranges {Graph|A-F|Quit} — assign one or all series to the second y-axis.
+# Y-Ranges  {Graph|A-F|Quit} — reassign back to the first.
+# Frame {Left|Right|Top|Bottom|All|Clear|Quit} — toggle each side.
+#
+# Reference: R3.1 Reference pp. 2-194 → 2-198.
+
+SIZE 80 30
+
+# Default: every series on first y-axis ("Y" not "2Y").
+KEY /
+KEY G
+ASSERT_SCREEN  A: Y
+ASSERT_SCREEN  B: Y
+ASSERT_SCREEN  C: Y
+ASSERT_SCREEN  D: Y
+ASSERT_SCREEN  E: Y
+ASSERT_SCREEN  F: Y
+ESC
+ESC
+
+# /GTF2A — series A on 2Y-axis.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY 2
+KEY A
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  A: 2Y
+ASSERT_SCREEN  B: Y
+ESC
+ESC
+
+# /GTFYA — series A back to first y-axis.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY Y
+KEY A
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  A: Y
+ESC
+ESC
+
+# /GTF2G — every series on 2Y-axis.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY 2
+KEY G
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  A: 2Y
+ASSERT_SCREEN  B: 2Y
+ASSERT_SCREEN  C: 2Y
+ASSERT_SCREEN  D: 2Y
+ASSERT_SCREEN  E: 2Y
+ASSERT_SCREEN  F: 2Y
+ESC
+ESC
+
+# /GTFYG — every series back to first y-axis.
+# (The panel header "Y/2Y" contains the substring "2Y", so per-row
+# checks are required rather than a bare ASSERT_SCREEN_NOT_CONTAINS.)
+KEY /
+KEY G
+KEY T
+KEY F
+KEY Y
+KEY G
+KEY /
+KEY G
+ASSERT_SCREEN  A: Y
+ASSERT_SCREEN  B: Y
+ASSERT_SCREEN  C: Y
+ASSERT_SCREEN  D: Y
+ASSERT_SCREEN  E: Y
+ASSERT_SCREEN  F: Y
+ASSERT_SCREEN_NOT_CONTAINS  A: 2Y
+ASSERT_SCREEN_NOT_CONTAINS  F: 2Y
+ESC
+ESC
+
+# Frame defaults to all four sides on.
+KEY /
+KEY G
+ASSERT_SCREEN  x Left
+ASSERT_SCREEN  x Right
+ASSERT_SCREEN  x Top
+ASSERT_SCREEN  x Bottom
+ESC
+ESC
+
+# /GTFFLN — Frame Left No.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY L
+KEY N
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN_NOT_CONTAINS  x Left
+ASSERT_SCREEN  x Right
+ESC
+ESC
+
+# /GTFFC — Frame Clear (all four off).
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY C
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN_NOT_CONTAINS  x Left
+ASSERT_SCREEN_NOT_CONTAINS  x Right
+ASSERT_SCREEN_NOT_CONTAINS  x Top
+ASSERT_SCREEN_NOT_CONTAINS  x Bottom
+ESC
+ESC
+
+# /GTFFA — Frame All (all four on).
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY A
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  x Left
+ASSERT_SCREEN  x Right
+ASSERT_SCREEN  x Top
+ASSERT_SCREEN  x Bottom
+ESC
+ESC
+
+ASSERT_MODE    READY

@@ -607,6 +607,40 @@ pub(super) enum SortDir {
     Descending,
 }
 
+/// Which side of a `/Graph Type Features Frame` submenu the dispatch
+/// is targeting. Used by `App::set_graph_frame_side` to compress the
+/// eight Yes/No leaves into one helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GraphFrameSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// Which `/Graph Options Scale {Y|X|2Y}-Scale` axis the menu dispatch
+/// is targeting. Used by `App::set_graph_scale_mode` to compress the
+/// six per-axis Auto/Manual leaves into one helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GraphScaleAxis {
+    Y,
+    X,
+    TwoY,
+}
+
+/// Which `/Graph Options Titles` slot a string prompt is about to
+/// commit into. Reference p. 2-216, 0100-graph-options-titles.html.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphTitleSlot {
+    First,
+    Second,
+    XAxis,
+    YAxis,
+    TwoYAxis,
+    Note,
+    OtherNote,
+}
+
 /// Which key slot a Primary-Key / Secondary-Key / Extra-Key
 /// Asc/Desc submenu is about to write into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1321,6 +1355,22 @@ pub(super) enum PromptNext {
         start: f64,
         step: f64,
     },
+    /// `/Graph Options Titles {slot}` — single-line text prompt. The
+    /// committed buffer replaces `current_graph.options.titles.{slot}`;
+    /// an empty buffer clears the slot back to `None`.
+    GraphOptionsTitle {
+        slot: GraphTitleSlot,
+    },
+    /// `/Graph Options Legend {A..F}` — single-line text prompt. The
+    /// committed buffer replaces `current_graph.options.legend[slot]`;
+    /// an empty buffer clears the slot back to `None`. `slot` is the
+    /// 0..=5 index into the legend array (A=0 .. F=5).
+    GraphOptionsLegend {
+        slot: usize,
+    },
+    /// `/Graph Options Scale Skip` — numeric prompt. Commit clamps to
+    /// `1..=8192` and writes `current_graph.options.skip`.
+    GraphOptionsScaleSkip,
 }
 
 /// `/Worksheet Titles` axis selector.  Both freezes the rows above
@@ -1498,6 +1548,14 @@ impl PromptNext {
             PromptNext::DataFillStart { .. }
             | PromptNext::DataFillStep { .. }
             | PromptNext::DataFillStop { .. } => c.is_ascii_digit() || matches!(c, '.' | '-' | '+'),
+            // Graph titles and legends are free-form printable text —
+            // anything except control characters that would corrupt
+            // the single-line buffer.
+            PromptNext::GraphOptionsTitle { .. } | PromptNext::GraphOptionsLegend { .. } => {
+                !c.is_control()
+            }
+            // Skip is a small integer (1..=8192). Digits only.
+            PromptNext::GraphOptionsScaleSkip => c.is_ascii_digit(),
         }
     }
 }
@@ -1706,6 +1764,13 @@ pub(super) enum PendingCommand {
     GraphSeries {
         series: Series,
     },
+    /// POINT step of `/Graph Options Data-Labels {A..F}`: on commit,
+    /// the selected range is stored in
+    /// `current_graph.options.data_labels[slot]`. `slot` is 0..=5
+    /// (A=0 .. F=5).
+    GraphDataLabels {
+        slot: usize,
+    },
     /// POINT step of `/Worksheet Column Column-Range Set-Width`. The
     /// width was captured from the prompt; on commit, apply it to every
     /// column in the selected range.
@@ -1857,6 +1922,7 @@ impl PendingCommand {
             PendingCommand::PrintFileRange => "Enter range to print:",
             PendingCommand::RangeSearchRange { .. } => "Enter search range:",
             PendingCommand::GraphSeries { .. } => "Enter graph range:",
+            PendingCommand::GraphDataLabels { .. } => "Enter data-label range:",
             PendingCommand::ColumnRangeSetWidth { .. } => "Enter range of columns to set:",
             PendingCommand::ColumnRangeResetWidth => "Enter range of columns to reset:",
             PendingCommand::ColumnHide => "Enter range of columns to hide:",

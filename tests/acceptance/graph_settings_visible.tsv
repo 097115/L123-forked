@@ -1,0 +1,42 @@
+# Graph Settings overlay — slice B of docs/GRAPH_PLAN.md.
+#
+# Pressing `/G` from READY enters Mode::Menu and overlays the four-panel
+# Graph Settings sheet on top of the worksheet area for the duration of
+# the /Graph subtree. Esc dismisses the menu and the overlay disappears.
+#
+# Reference: Lotus 1-2-3 R3.1 Reference p. 2-230 ("Graph Settings"
+# figure attached to the /Graph command).
+
+SIZE 80 30
+
+# Baseline: not in /Graph yet, no overlay on screen.
+ASSERT_MODE                 READY
+ASSERT_SCREEN_NOT_CONTAINS  Graph Settings
+
+# Enter /Graph.
+KEY /
+KEY G
+ASSERT_MODE                 MENU
+
+# Four-panel sheet is up.
+ASSERT_SCREEN  Graph Settings
+ASSERT_SCREEN  Graph Type
+ASSERT_SCREEN  Data Ranges
+ASSERT_SCREEN  Graph Type Features
+ASSERT_SCREEN  Options
+
+# Default state shown in panels.
+ASSERT_SCREEN  x Line
+ASSERT_SCREEN  x Vertical
+ASSERT_SCREEN  x Colors on
+
+# Esc pops one level: out of /Graph, back to root menu. The overlay
+# disappears because we are no longer in the /Graph subtree.
+ESC
+ASSERT_MODE                 MENU
+ASSERT_SCREEN_NOT_CONTAINS  Graph Settings
+
+# Second Esc dismisses the menu entirely.
+ESC
+ASSERT_MODE                 READY
+ASSERT_SCREEN_NOT_CONTAINS  Graph Settings

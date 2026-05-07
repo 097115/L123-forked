@@ -481,6 +481,160 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_SCALE_MODE Y AUTO" — axis token (Y, X, or 2)
+            // and expected mode (AUTO | MANUAL).
+            "ASSERT_GRAPH_SCALE_MODE" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("").trim();
+                let got = app.graph_scale_mode_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale mode {axis_ch} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_SKIP 5" — current skip factor.
+            "ASSERT_GRAPH_SCALE_SKIP" => {
+                let want: u32 = rest.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_SCALE_SKIP expects an integer, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_scale_skip();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph skip expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_DATA_LABELS A  A:A1..A:A5" — slot letter
+            // A..F then expected range string. Use `none` (or empty
+            // trailer) for an unset slot.
+            "ASSERT_GRAPH_DATA_LABELS" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    ""
+                } else {
+                    want_raw
+                };
+                let slot = match slot_ch.to_ascii_uppercase() {
+                    'A' => 0,
+                    'B' => 1,
+                    'C' => 2,
+                    'D' => 3,
+                    'E' => 4,
+                    'F' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_DATA_LABELS bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_data_labels_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph data-labels {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_LEGEND A  Net Sales" — slot letter A..F
+            // then expected text. Use `none` (or empty trailer) for
+            // an unset legend.
+            "ASSERT_GRAPH_LEGEND" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw)
+                };
+                let slot = match slot_ch.to_ascii_uppercase() {
+                    'A' => 0,
+                    'B' => 1,
+                    'C' => 2,
+                    'D' => 3,
+                    'E' => 4,
+                    'F' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_LEGEND bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_legend_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph legend {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_TITLE First  Sales 1991" — slot token then
+            // the expected text. Tokens: First, Second, X, Y, 2Y, Note,
+            // Other. Use the literal `none` (or empty trailer) for unset.
+            "ASSERT_GRAPH_TITLE" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_tok = parts.next().unwrap_or("");
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw)
+                };
+                use l123_ui::GraphTitleSlot;
+                let slot = match slot_tok {
+                    "First" => GraphTitleSlot::First,
+                    "Second" => GraphTitleSlot::Second,
+                    "X" => GraphTitleSlot::XAxis,
+                    "Y" => GraphTitleSlot::YAxis,
+                    "2Y" => GraphTitleSlot::TwoYAxis,
+                    "Note" => GraphTitleSlot::Note,
+                    "Other" => GraphTitleSlot::OtherNote,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_TITLE bad slot {slot_tok:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_title_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph title {slot_tok} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_FORMAT A  BOTH" — slot letter A..F, then
+            // expected format token (LINES, SYMBOLS, BOTH, NEITHER, AREA).
+            "ASSERT_GRAPH_FORMAT" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("").trim();
+                let got = app.graph_format_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph format {slot} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_GRID hv" — assert the current graph's /Graph
+            // Options Grid mask. Token is the lowercase letters of the
+            // active flags (h, v, y) in that order, or `none`.
+            "ASSERT_GRAPH_GRID" => {
+                let got = app.graph_grid_str();
+                assert_eq!(
+                    got,
+                    rest,
+                    "{}:{line_no}: graph grid expected {rest} got {got}",
+                    path.display()
+                );
+            }
             "ASSERT_BEEP_COUNT" => {
                 let want: u64 = rest.parse().unwrap_or_else(|_| {
                     panic!(
@@ -1071,6 +1225,17 @@ transcripts! {
     m7_graph_reset      => "M7_graph_reset.tsv",
     m7_graph_view_f10   => "M7_graph_view_f10.tsv",
     m7_graph_save       => "M7_graph_save.tsv",
+    graph_settings_visible => "graph_settings_visible.tsv",
+    graph_features_toggles => "graph_features_toggles.tsv",
+    graph_features_y_axis_and_frame => "graph_features_y_axis_and_frame.tsv",
+    graph_options_color => "graph_options_color.tsv",
+    graph_options_grid => "graph_options_grid.tsv",
+    graph_options_format => "graph_options_format.tsv",
+    graph_options_titles => "graph_options_titles.tsv",
+    graph_options_legend => "graph_options_legend.tsv",
+    graph_options_data_labels => "graph_options_data_labels.tsv",
+    graph_options_scale => "graph_options_scale.tsv",
+    graph_options_advanced_shell => "graph_options_advanced_shell.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",
