@@ -713,6 +713,9 @@ pub enum Action {
     /// `/Graph Name Reset` — immediately deletes every named graph
     /// in the current workbook. Reference is explicit: no confirmation.
     GraphNameReset,
+    /// `/Graph Name Table` — POINT prompt for an anchor; writes one
+    /// row per named graph, two columns: name + graph-type tag.
+    GraphNameTable,
 
     // ---- /Graph Group (slice E2 of GRAPH_PLAN.md) -------------------
     /// `/Graph Group` — enters POINT for the group range. The
@@ -4205,7 +4208,7 @@ const GRAPH_NAME_MENU: &[MenuItem] = &[
         name: "Table",
         help: "Write a table of named graphs to a worksheet range",
         help_page: "0075-graph-name-table.html",
-        body: MenuBody::NotImplemented("gn-table"),
+        body: MenuBody::Action(Action::GraphNameTable),
     },
 ];
 

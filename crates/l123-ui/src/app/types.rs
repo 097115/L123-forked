@@ -1804,6 +1804,11 @@ pub(super) enum PendingCommand {
     /// in order. Empty cells become `None`; ranges longer than six
     /// truncate; shorter ranges leave trailing slots untouched.
     GraphLegendRange,
+    /// POINT step of `/Graph Name Table`. Only the anchor cell of the
+    /// selected range matters; the table grows downward and to the
+    /// right from there. Two columns are written per named graph:
+    /// the name (column 0) and the graph type tag (column 1).
+    GraphNameTable,
     /// POINT step of `/Graph Group`. On commit, the range is stashed
     /// on `App::pending_graph_group_range` and the orientation
     /// submenu (Columnwise|Rowwise) is rooted; the chosen leaf walks
@@ -1962,6 +1967,7 @@ impl PendingCommand {
             PendingCommand::GraphSeries { .. } => "Enter graph range:",
             PendingCommand::GraphDataLabels { .. } => "Enter data-label range:",
             PendingCommand::GraphLegendRange => "Enter legend range:",
+            PendingCommand::GraphNameTable => "Enter range for table of named graphs:",
             PendingCommand::GraphGroup => "Enter graph group range:",
             PendingCommand::ColumnRangeSetWidth { .. } => "Enter range of columns to set:",
             PendingCommand::ColumnRangeResetWidth => "Enter range of columns to reset:",

@@ -838,6 +838,21 @@ fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
 /// Replace whole-word occurrences of `name` (case-insensitive,
 /// already lowercase) in `expr` with `replacement`. Mirrors the
 /// matching rules of `formula_uses_name`.
+/// Stable ASCII-uppercase tag for a graph type. Matches the token
+/// returned by `App::graph_type_str` so on-screen state, transcript
+/// directives, and the `/Graph Name Table` output all agree.
+fn graph_type_tag(t: l123_graph::GraphType) -> &'static str {
+    match t {
+        l123_graph::GraphType::Line => "LINE",
+        l123_graph::GraphType::Bar => "BAR",
+        l123_graph::GraphType::XY => "XY",
+        l123_graph::GraphType::Stack => "STACK",
+        l123_graph::GraphType::Pie => "PIE",
+        l123_graph::GraphType::HLCO => "HLCO",
+        l123_graph::GraphType::Mixed => "MIXED",
+    }
+}
+
 fn replace_name_in_formula(expr: &str, name: &str, replacement: &str) -> String {
     if name.is_empty() {
         return expr.to_string();
@@ -1360,15 +1375,7 @@ impl App {
     /// Current graph's type as an ASCII all-caps token, for use in
     /// `ASSERT_GRAPH_TYPE` transcript directives.
     pub fn graph_type_str(&self) -> &'static str {
-        match self.wb().current_graph.graph_type {
-            GraphType::Line => "LINE",
-            GraphType::Bar => "BAR",
-            GraphType::XY => "XY",
-            GraphType::Stack => "STACK",
-            GraphType::Pie => "PIE",
-            GraphType::HLCO => "HLCO",
-            GraphType::Mixed => "MIXED",
-        }
+        graph_type_tag(self.wb().current_graph.graph_type)
     }
 
     /// Current graph's range for a given series slot, formatted like
@@ -3622,6 +3629,7 @@ impl App {
                 self.wb_mut().graphs.clear();
                 self.close_menu();
             }
+            Action::GraphNameTable => self.begin_point(PendingCommand::GraphNameTable),
             Action::GraphGroup => self.begin_point(PendingCommand::GraphGroup),
             Action::GraphGroupColumnwise => self.apply_graph_group(GraphGroupOrientation::Columnwise),
             Action::GraphGroupRowwise => self.apply_graph_group(GraphGroupOrientation::Rowwise),
@@ -5955,6 +5963,10 @@ impl App {
                 }
                 self.mode = Mode::Ready;
             }
+            PendingCommand::GraphNameTable => {
+                self.execute_graph_name_table(first.start);
+                self.mode = Mode::Ready;
+            }
             PendingCommand::GraphGroup => {
                 self.pending_graph_group_range = Some(first);
                 self.menu = Some(MenuState::rooted_at(menu::GRAPH_GROUP_ORIENT_MENU));
@@ -8203,6 +8215,57 @@ impl App {
                 CellContents::Label {
                     prefix: LabelPrefix::Apostrophe,
                     text: range_to_lotus_form(*range),
+                },
+                &mut writes,
+            );
+        }
+        if !writes.is_empty() {
+            self.push_journal_batch(vec![JournalEntry::RangeRestore {
+                cells: writes
+                    .into_iter()
+                    .map(|(addr, prev)| (addr, prev.unwrap_or(CellContents::Empty)))
+                    .collect(),
+                formats: Vec::new(),
+                text_styles: Vec::new(),
+            }]);
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.wb_mut().dirty = true;
+        }
+    }
+
+    /// `/Graph Name Table` — write a directory of every named graph
+    /// to two columns starting at `anchor`. Column 0 holds the
+    /// (alphabetized) name; column 1 holds the graph-type tag
+    /// (BAR / LINE / XY / STACK / PIE / HLCO / MIXED). Each entry
+    /// is committed via `write_cell_with_undo` so the table reuses
+    /// the same journal-batch + recalc path as /Range Name Table.
+    fn execute_graph_name_table(&mut self, anchor: Address) {
+        let mut entries: Vec<(String, l123_graph::GraphType)> = self
+            .wb()
+            .graphs
+            .iter()
+            .map(|(name, def)| (name.clone(), def.graph_type))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (i, (name, gtype)) in entries.iter().enumerate() {
+            let row = anchor.row.saturating_add(i as u32);
+            let name_addr = Address::new(anchor.sheet, anchor.col, row);
+            let type_addr = Address::new(anchor.sheet, anchor.col.saturating_add(1), row);
+            self.write_cell_with_undo(
+                name_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: name.clone(),
+                },
+                &mut writes,
+            );
+            self.write_cell_with_undo(
+                type_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: graph_type_tag(*gtype).to_string(),
                 },
                 &mut writes,
             );
