@@ -374,11 +374,22 @@ where
             }
         })
         .collect();
-    chart.draw_series(
-        points
-            .iter()
-            .map(|&(px, py)| Circle::new((px, py), 4, BLUE.filled())),
-    )?;
+    let color = SERIES_PALETTE[0];
+    let label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "Series A".into());
+    chart
+        .draw_series(
+            points
+                .iter()
+                .map(|&(px, py)| Circle::new((px, py), 4, color.filled())),
+        )?
+        .label(label)
+        .legend(move |(x, y)| Circle::new((x + 6, y), 4, color.filled()));
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -1017,6 +1028,35 @@ mod tests {
         assert!(
             with_grid_lines > no_grid_lines,
             "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
+        );
+    }
+
+    #[test]
+    fn svg_xy_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::XY,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Sample".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (6, vec![1.0, 2.0, 3.0]), // X
+            (0, vec![10.0, 20.0, 30.0]), // A
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("Sample"), "XY SVG missing user legend text");
+        assert!(
+            !svg.contains("Series A"),
+            "fallback legend leaked through"
         );
     }
 
