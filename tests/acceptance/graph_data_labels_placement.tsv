@@ -1,0 +1,59 @@
+# /Graph Options Data-Labels {A-F} placement — after the POINT
+# range commits, a placement submenu (Center/Left/Above/Right/
+# Below) pops to record where each label sits relative to its
+# data point.
+#
+# Slice F (data-labels placement) of GRAPH_PLAN.md. Until this
+# slice the per-series data-label range was stored but no
+# placement metadata existed; the placement submenu is the
+# follow-up step the original /GOD path asks. Default placement
+# is Above. Reference p. 2-217.
+
+SIZE 80 30
+
+# Defaults: every slot's placement is Above.
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Above
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  B  Above
+
+# Seed A1..A3 = Q1..Q3 so the data-label POINT has cells to bind.
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+HOME
+
+# /GOD A — range A1..A3 then placement Center.
+KEY /
+KEY G
+KEY O
+KEY D
+KEY A
+DOWN
+DOWN
+ENTER
+# Placement submenu rooted; choose Center.
+KEY C
+ASSERT_MODE                          READY
+ASSERT_GRAPH_DATA_LABELS  A          A:A1..A:A3
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Center
+# B still default.
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  B  Above
+
+# /GOD B — bind B at the same range, placement Below.
+HOME
+KEY /
+KEY G
+KEY O
+KEY D
+KEY B
+DOWN
+DOWN
+ENTER
+KEY B
+ASSERT_MODE                          READY
+ASSERT_GRAPH_DATA_LABELS  B          A:A1..A:A3
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  B  Below
+# A unchanged.
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Center

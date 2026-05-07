@@ -221,6 +221,12 @@ pub struct App {
     /// it and walks the range. Cleared once consumed (or when the
     /// orient submenu is dismissed).
     pending_graph_group_range: Option<l123_core::Range>,
+    /// `/Graph Options Data-Labels {A-F}` slot stashed between the
+    /// POINT range commit and the placement submenu's commit. The
+    /// rooted Center/Left/Above/Right/Below leaves read this to know
+    /// which slot's `data_labels_placement` to write. Cleared once
+    /// consumed.
+    pending_data_labels_slot: Option<usize>,
     /// After committing a filename that already exists on disk, this
     /// carries the chosen path through the Cancel/Replace/Backup
     /// submenu. Mode stays MENU while present.
@@ -1150,6 +1156,7 @@ impl App {
             error_message: None,
             pending_name: None,
             pending_graph_group_range: None,
+            pending_data_labels_slot: None,
             save_confirm: None,
             erase_confirm: None,
             pending_xtract_path: None,
@@ -2168,6 +2175,28 @@ impl App {
     /// first column (or row) becomes X; succeeding ones become A, B,
     /// C, D, E, F. Up to 7 strips are used. Slots beyond what the
     /// range provides stay cleared. Overrides any prior /Graph X or
+    /// Consumes the slot stashed during the data-labels POINT step
+    /// and writes the chosen placement, then pops back to READY.
+    /// No-op when the stash is empty (defensive — should not happen
+    /// in practice since the placement submenu is only rooted from
+    /// the commit path that sets the stash).
+    fn apply_data_labels_placement(&mut self, placement: l123_graph::DataLabelPlacement) {
+        let Some(slot) = self.pending_data_labels_slot.take() else {
+            self.close_menu();
+            return;
+        };
+        if let Some(s) = self
+            .wb_mut()
+            .current_graph
+            .options
+            .data_labels_placement
+            .get_mut(slot)
+        {
+            *s = placement;
+        }
+        self.close_menu();
+    }
+
     /// A-F assignments.
     fn apply_graph_group(&mut self, orient: GraphGroupOrientation) {
         let Some(range) = self.pending_graph_group_range.take() else {
@@ -2372,6 +2401,20 @@ impl App {
             None => String::new(),
             Some(rr) => format!("{}..{}", rr.start.display_full(), rr.end.display_full()),
         }
+    }
+
+    /// Read accessor for `current_graph.options.data_labels_placement[slot]`.
+    /// Returns the `DataLabelPlacement::tag` string ("Center", "Above", …).
+    /// Out-of-range slot indices return the default placement's tag.
+    pub fn graph_data_labels_placement_str(&self, slot: usize) -> &'static str {
+        self.wb()
+            .current_graph
+            .options
+            .data_labels_placement
+            .get(slot)
+            .copied()
+            .unwrap_or_default()
+            .tag()
     }
 
     /// Read accessor for `current_graph.options.legend[slot]`. `slot` is
@@ -3593,6 +3636,21 @@ impl App {
             Action::GraphOptionsDataLabelsD => self.begin_point(PendingCommand::GraphDataLabels { slot: 3 }),
             Action::GraphOptionsDataLabelsE => self.begin_point(PendingCommand::GraphDataLabels { slot: 4 }),
             Action::GraphOptionsDataLabelsF => self.begin_point(PendingCommand::GraphDataLabels { slot: 5 }),
+            Action::GraphOptionsDataLabelsCenter => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Center)
+            }
+            Action::GraphOptionsDataLabelsLeft => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Left)
+            }
+            Action::GraphOptionsDataLabelsAbove => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Above)
+            }
+            Action::GraphOptionsDataLabelsRight => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Right)
+            }
+            Action::GraphOptionsDataLabelsBelow => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Below)
+            }
             Action::GraphOptionsScaleYAuto => self.set_graph_scale_mode(GraphScaleAxis::Y, l123_graph::ScaleMode::Automatic),
             Action::GraphOptionsScaleYManual => self.set_graph_scale_mode(GraphScaleAxis::Y, l123_graph::ScaleMode::Manual),
             Action::GraphOptionsScaleXAuto => self.set_graph_scale_mode(GraphScaleAxis::X, l123_graph::ScaleMode::Automatic),
@@ -5953,7 +6011,13 @@ impl App {
                 {
                     *s = Some(first);
                 }
-                self.mode = Mode::Ready;
+                // Root the placement follow-up submenu and stash
+                // the slot so the chosen leaf knows where to write.
+                self.pending_data_labels_slot = Some(slot);
+                self.menu = Some(MenuState::rooted_at(
+                    menu::GO_DATA_LABELS_PLACEMENT_MENU,
+                ));
+                self.mode = Mode::Menu;
             }
             PendingCommand::GraphLegendRange => {
                 let labels = self.read_series_labels(first);

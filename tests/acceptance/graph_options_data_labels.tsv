@@ -1,11 +1,11 @@
-# /Graph Options Data-Labels — slice D5 of GRAPH_PLAN.md (range only).
+# /Graph Options Data-Labels — slice D5 of GRAPH_PLAN.md (range +
+# placement follow-up).
 #
 # Per Reference p. 2-204, 0088-graph-options-data-labels.html:
-#   /GOD {A-F}    → POINT mode; commit stores range in data_labels[slot]
+#   /GOD {A-F}    → POINT mode; commit stores range in data_labels[slot],
+#                   then a placement submenu (Center/Left/Above/Right/
+#                   Below) pops to record placement on the same slot.
 #   /GOD Group    → range + Columnwise|Rowwise → distribute to A-F (deferred)
-#   After range, placement {Center|Left|Above|Right|Below} (deferred)
-#
-# This slice wires the per-series range pointer only.
 
 # Seed A1..A3 with labels.
 KEYS Q1
@@ -22,7 +22,7 @@ ASSERT_POINTER       A:A1
 ASSERT_GRAPH_DATA_LABELS  A  none
 ASSERT_GRAPH_DATA_LABELS  F  none
 
-# /GODA — POINT mode at A1; extend to A3; commit.
+# /GODA — POINT mode at A1; extend to A3; commit; placement A=Above.
 KEY /
 KEY G
 KEY O
@@ -32,11 +32,13 @@ ASSERT_MODE          POINT
 DOWN
 DOWN
 ENTER
+ASSERT_MODE          MENU
+KEY A
 ASSERT_MODE          READY
 ASSERT_GRAPH_DATA_LABELS  A  A:A1..A:A3
 ASSERT_GRAPH_DATA_LABELS  B  none
 
-# /GODF — set F's data-label range to a single cell.
+# /GODF — set F's data-label range to a single cell, placement Above.
 HOME
 RIGHT
 ASSERT_POINTER       A:B1
@@ -47,6 +49,7 @@ KEY D
 KEY F
 ASSERT_MODE          POINT
 ENTER
+KEY A
 ASSERT_MODE          READY
 ASSERT_GRAPH_DATA_LABELS  F  A:B1..A:B1
 ASSERT_GRAPH_DATA_LABELS  A  A:A1..A:A3

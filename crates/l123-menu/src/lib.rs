@@ -676,6 +676,15 @@ pub enum Action {
     GraphOptionsDataLabelsD,
     GraphOptionsDataLabelsE,
     GraphOptionsDataLabelsF,
+    /// Leaves of the data-label placement follow-up menu rooted
+    /// after `/GOD {A-F}` commits the POINT range. Each one writes
+    /// `current_graph.options.data_labels_placement[slot]` using
+    /// the slot stashed on `App::pending_data_labels_slot`.
+    GraphOptionsDataLabelsCenter,
+    GraphOptionsDataLabelsLeft,
+    GraphOptionsDataLabelsAbove,
+    GraphOptionsDataLabelsRight,
+    GraphOptionsDataLabelsBelow,
 
     // ---- /Graph Options Scale (slice D Scale portion) ----------------
     // Per-axis Auto/Manual mode, plus the global Skip prompt.
@@ -4522,6 +4531,48 @@ const GO_DATA_LABELS_MENU: &[MenuItem] = &[
         help: "Return to /Graph Options",
         help_page: "0077-graph-options.html",
         body: MenuBody::Action(Action::GraphOptionsQuit),
+    },
+];
+
+/// Placement follow-up rooted after `/GOD {A-F}` commits a range.
+/// Letters mirror the original 1-2-3 R3.4a "Centered Left Above
+/// Right Below" prompt; each leaf writes the placement and pops
+/// back to READY.
+pub const GO_DATA_LABELS_PLACEMENT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'C',
+        name: "Center",
+        help: "Place data labels at the data point",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsCenter),
+    },
+    MenuItem {
+        letter: 'L',
+        name: "Left",
+        help: "Place data labels to the left of the point",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsLeft),
+    },
+    MenuItem {
+        letter: 'A',
+        name: "Above",
+        help: "Place data labels above the point",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsAbove),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Right",
+        help: "Place data labels to the right of the point",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsRight),
+    },
+    MenuItem {
+        letter: 'B',
+        name: "Below",
+        help: "Place data labels below the point",
+        help_page: "0088-graph-options-data-labels.html",
+        body: MenuBody::Action(Action::GraphOptionsDataLabelsBelow),
     },
 ];
 

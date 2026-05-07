@@ -129,6 +129,35 @@ pub struct GridMask {
     pub y_axis: bool,
 }
 
+/// `/Graph Options Data-Labels {slot}` placement — where the label
+/// sits relative to its data point. Default `Above` matches 1-2-3
+/// R3.4a's "Center" rendering for unspecified placement (the
+/// dialog's first leaf in the original menu). Reference p. 2-217.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum DataLabelPlacement {
+    Center,
+    Left,
+    #[default]
+    Above,
+    Right,
+    Below,
+}
+
+impl DataLabelPlacement {
+    /// Stable ASCII-cased tag for the placement, used by the
+    /// settings panel and `ASSERT_GRAPH_DATA_LABELS_PLACEMENT`
+    /// transcript directive.
+    pub fn tag(self) -> &'static str {
+        match self {
+            DataLabelPlacement::Center => "Center",
+            DataLabelPlacement::Left => "Left",
+            DataLabelPlacement::Above => "Above",
+            DataLabelPlacement::Right => "Right",
+            DataLabelPlacement::Below => "Below",
+        }
+    }
+}
+
 /// `/Graph Options Titles` — the seven independently editable text
 /// strings that decorate a graph. Reference p. 2-216.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -215,6 +244,11 @@ pub struct GraphOptions {
     /// `true` = `/Graph Options Color`; `false` = `/Graph Options B&W`.
     pub color: bool,
     pub data_labels: [Option<Range>; 6],
+    /// Per-series placement of the data-label glyph relative to its
+    /// data point. Set independently from `data_labels` so changing
+    /// the placement after binding the range doesn't have to re-walk
+    /// the cells.
+    pub data_labels_placement: [DataLabelPlacement; 6],
     pub advanced: Advanced,
 }
 
@@ -231,6 +265,7 @@ impl Default for GraphOptions {
             skip: 1,
             color: true,
             data_labels: Default::default(),
+            data_labels_placement: [DataLabelPlacement::default(); 6],
             advanced: Advanced::default(),
         }
     }

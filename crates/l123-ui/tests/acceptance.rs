@@ -608,6 +608,33 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_DATA_LABELS_PLACEMENT A  Center" — slot
+            // letter A..F, then expected placement (Center | Left |
+            // Above | Right | Below).
+            "ASSERT_GRAPH_DATA_LABELS_PLACEMENT" => {
+                let mut parts = rest.split_whitespace();
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let slot = match slot_ch {
+                    'A' | 'a' => 0,
+                    'B' | 'b' => 1,
+                    'C' | 'c' => 2,
+                    'D' | 'd' => 3,
+                    'E' | 'e' => 4,
+                    'F' | 'f' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_DATA_LABELS_PLACEMENT bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_data_labels_placement_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: data-labels placement {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_LEGEND A  Net Sales" — slot letter A..F
             // then expected text. Use `none` (or empty trailer) for
             // an unset legend.
@@ -1303,6 +1330,7 @@ transcripts! {
     graph_options_scale_bounds => "graph_options_scale_bounds.tsv",
     graph_frame_y_axis => "graph_frame_y_axis.tsv",
     graph_name_table => "graph_name_table.tsv",
+    graph_data_labels_placement => "graph_data_labels_placement.tsv",
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",
