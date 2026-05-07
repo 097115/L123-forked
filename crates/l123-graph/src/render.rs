@@ -105,6 +105,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         GraphType::Line => render_line(vals, inner, buf),
         GraphType::Pie => render_pie(vals, inner, buf),
         GraphType::XY => render_xy(vals, inner, buf),
+        GraphType::Mixed => render_mixed(vals, inner, buf),
         other => write_centered(
             inner,
             buf,
@@ -869,6 +870,38 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         let cell = &mut buf[(x, plot_bottom)];
         cell.set_symbol("─");
         cell.set_style(Style::default().fg(Color::Gray));
+    }
+}
+
+/// Mixed graph, terminal flavor: A series renders as bars and B
+/// series renders as a dot-line over the same plot area, matching
+/// the raster `draw_mixed` convention. Each layer scales to its
+/// own extent — the original 1-2-3 R3.4a Mixed graph optionally
+/// maps B to the secondary (2Y) axis, which is the same effect.
+///
+/// When only A is set this collapses to a plain Bar; when only B
+/// is set, to a plain Line. When neither is set, prints a centered
+/// hint so the user knows to bind a series.
+fn render_mixed(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    let a = vals.data[0].clone();
+    let b = vals.data[1].clone();
+    if a.is_none() && b.is_none() {
+        write_centered(area, buf, "Mixed needs at least one of A or B.");
+        return;
+    }
+    if a.is_some() {
+        let bars = GraphValues {
+            data: [a, None, None, None, None, None],
+            ..Default::default()
+        };
+        render_bar(&bars, area, buf, false);
+    }
+    if b.is_some() {
+        let line = GraphValues {
+            data: [b, None, None, None, None, None],
+            ..Default::default()
+        };
+        render_line(&line, area, buf);
     }
 }
 
