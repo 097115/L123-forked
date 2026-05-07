@@ -28,11 +28,18 @@ use crate::{GraphDef, GraphType};
 /// renderers that label categorical positions (Pie wedges, eventually
 /// Bar/Line tick labels) can use the user's strings instead of
 /// positional indices. Parallel to `x` and only set when X is bound.
+///
+/// `data_label_text` carries the cell text bound to each per-series
+/// `/Graph Options Data-Labels {A-F}` range. Parallel to `data`;
+/// only set when the corresponding range is bound. The placement
+/// (Above/Below/etc.) lives on `GraphOptions::data_labels_placement`
+/// alongside the range itself.
 #[derive(Clone, Debug, Default)]
 pub struct GraphValues {
     pub x: Option<Vec<f64>>,
     pub x_labels: Option<Vec<String>>,
     pub data: [Option<Vec<f64>>; 6],
+    pub data_label_text: [Option<Vec<String>>; 6],
 }
 
 impl GraphValues {
@@ -46,6 +53,16 @@ impl GraphValues {
     /// The first data series that has any numeric values, in A..F order.
     pub fn first_series(&self) -> Option<&[f64]> {
         self.data.iter().find_map(|opt| opt.as_deref())
+    }
+
+    /// Same as [`first_series`](Self::first_series) but also returns
+    /// the slot index (0..=5 for A..F) so callers can pull the
+    /// matching `data_label_text[slot]` and any other per-slot state.
+    pub fn first_series_with_slot(&self) -> Option<(usize, &[f64])> {
+        self.data
+            .iter()
+            .enumerate()
+            .find_map(|(i, opt)| opt.as_deref().map(|s| (i, s)))
     }
 }
 
@@ -836,8 +853,12 @@ fn render_bar_horizontal(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
 /// of how many samples there are. Y bounds default to the A series'
 /// own min/max; `/Graph Options Scale Y Manual` with Lower / Upper
 /// overrides them via `ScaleAxis::apply`.
+///
+/// When the matching slot's data labels are bound, each label's
+/// cell text is painted near its `•` at the placement offset
+/// (Center / Left / Above / Right / Below).
 fn render_line(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
-    let Some(series) = vals.first_series() else {
+    let Some((slot, series)) = vals.first_series_with_slot() else {
         write_centered(area, buf, "No numeric A-series values to plot.");
         return;
     };
@@ -886,12 +907,72 @@ fn render_line(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer)
             cell.set_symbol("•");
             cell.set_style(style);
         }
+        // Per-point data label, if bound for this slot. Painted
+        // after the dot so it sits over the line glyph for
+        // Center placement.
+        if let Some(label) = vals
+            .data_label_text
+            .get(slot)
+            .and_then(|opt| opt.as_deref())
+            .and_then(|labels| labels.get(i).filter(|s| !s.is_empty()))
+        {
+            let placement = def.options.data_labels_placement[slot];
+            paint_data_label(label, x, y, placement, area, buf);
+        }
     }
     for x in area.left()..area.right() {
         let cell = &mut buf[(x, plot_bottom)];
         cell.set_symbol("─");
         cell.set_style(Style::default().fg(Color::Gray));
     }
+}
+
+/// Paint a data-label string near `(anchor_x, anchor_y)` according
+/// to `placement`. Respects `area` bounds — labels that would spill
+/// outside are clipped (truncated for Right/Center, repositioned
+/// only when fully off-area for Left).
+fn paint_data_label(
+    text: &str,
+    anchor_x: u16,
+    anchor_y: u16,
+    placement: crate::DataLabelPlacement,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    use crate::DataLabelPlacement::*;
+    let style = Style::default().fg(Color::White);
+    let len = text.chars().count() as u16;
+    let (lx, ly) = match placement {
+        Above => {
+            if anchor_y == area.top() {
+                return;
+            }
+            (anchor_x.saturating_sub(len / 2), anchor_y - 1)
+        }
+        Below => {
+            if anchor_y + 1 >= area.bottom() {
+                return;
+            }
+            (anchor_x.saturating_sub(len / 2), anchor_y + 1)
+        }
+        Center => (anchor_x.saturating_sub(len / 2), anchor_y),
+        Left => {
+            if anchor_x < len + 1 {
+                return;
+            }
+            (anchor_x - len - 1, anchor_y)
+        }
+        Right => (anchor_x.saturating_add(1), anchor_y),
+    };
+    if ly < area.top() || ly >= area.bottom() {
+        return;
+    }
+    let max_len = area.right().saturating_sub(lx);
+    if max_len == 0 {
+        return;
+    }
+    let truncated: String = text.chars().take(max_len as usize).collect();
+    buf.set_string(lx, ly, truncated, style);
 }
 
 /// HLCO (High-Low-Close-Open) chart, terminal flavor. Each x

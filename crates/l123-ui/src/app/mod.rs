@@ -2640,6 +2640,11 @@ impl App {
                 out.data[i] = Some(self.read_series_values(r));
             }
         }
+        for (i, slot) in def.options.data_labels.iter().enumerate() {
+            if let Some(r) = *slot {
+                out.data_label_text[i] = Some(self.read_series_labels(r));
+            }
+        }
         out
     }
 
