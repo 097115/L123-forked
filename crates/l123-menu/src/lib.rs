@@ -507,6 +507,21 @@ pub enum Action {
     /// `/Graph Reset Graph` — clear every range and restore the
     /// default type.
     GraphResetGraph,
+    /// `/Graph Reset X` — clear the X range only.
+    GraphResetX,
+    /// `/Graph Reset A`..`/Graph Reset F` — clear one A-F range.
+    GraphResetA,
+    GraphResetB,
+    GraphResetC,
+    GraphResetD,
+    GraphResetE,
+    GraphResetF,
+    /// `/Graph Reset Ranges` — clear X and every A-F range; keep
+    /// type, features, and options.
+    GraphResetRanges,
+    /// `/Graph Reset Options` — restore options (titles, legends,
+    /// grid, scale, …) to default; keep ranges, type, and features.
+    GraphResetOptions,
     /// `/Graph View` — full-screen graph display (same as F10).
     GraphView,
     /// `/Graph Save` — prompt for a filename and write the graph to
@@ -4895,63 +4910,63 @@ const GRAPH_RESET_MENU: &[MenuItem] = &[
         name: "X",
         help: "Clear X-axis range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-x"),
+        body: MenuBody::Action(Action::GraphResetX),
     },
     MenuItem {
         letter: 'A',
         name: "A",
         help: "Clear A range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-a"),
+        body: MenuBody::Action(Action::GraphResetA),
     },
     MenuItem {
         letter: 'B',
         name: "B",
         help: "Clear B range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-b"),
+        body: MenuBody::Action(Action::GraphResetB),
     },
     MenuItem {
         letter: 'C',
         name: "C",
         help: "Clear C range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-c"),
+        body: MenuBody::Action(Action::GraphResetC),
     },
     MenuItem {
         letter: 'D',
         name: "D",
         help: "Clear D range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-d"),
+        body: MenuBody::Action(Action::GraphResetD),
     },
     MenuItem {
         letter: 'E',
         name: "E",
         help: "Clear E range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-e"),
+        body: MenuBody::Action(Action::GraphResetE),
     },
     MenuItem {
         letter: 'F',
         name: "F",
         help: "Clear F range",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-f"),
+        body: MenuBody::Action(Action::GraphResetF),
     },
     MenuItem {
         letter: 'R',
         name: "Ranges",
         help: "Clear X and A..F together (keep options)",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-ranges"),
+        body: MenuBody::Action(Action::GraphResetRanges),
     },
     MenuItem {
         letter: 'O',
         name: "Options",
         help: "Reset graph options (keep ranges)",
         help_page: "",
-        body: MenuBody::NotImplemented("gr-options"),
+        body: MenuBody::Action(Action::GraphResetOptions),
     },
     MenuItem {
         letter: 'Q',

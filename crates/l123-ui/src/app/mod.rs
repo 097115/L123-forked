@@ -2367,6 +2367,13 @@ impl App {
 
     /// F10 / `/Graph View`. Snapshot the current graph's series values
     /// and transition to [`Mode::Graph`]. An empty graph shows a "define
+    /// Shared back end for `/Graph Reset {X | A | B | C | D | E | F}`.
+    /// Clears the named slot and returns to READY.
+    fn execute_graph_clear_series(&mut self, s: Series) {
+        self.wb_mut().current_graph.clear(s);
+        self.close_menu();
+    }
+
     /// ranges first" placeholder rather than silently no-op'ing so the
     /// user sees something happened.
     fn enter_graph_view(&mut self) {
@@ -3348,6 +3355,21 @@ impl App {
             Action::GraphF => self.begin_point(PendingCommand::GraphSeries { series: Series::F }),
             Action::GraphResetGraph => {
                 self.wb_mut().current_graph.reset();
+                self.close_menu();
+            }
+            Action::GraphResetX => self.execute_graph_clear_series(Series::X),
+            Action::GraphResetA => self.execute_graph_clear_series(Series::A),
+            Action::GraphResetB => self.execute_graph_clear_series(Series::B),
+            Action::GraphResetC => self.execute_graph_clear_series(Series::C),
+            Action::GraphResetD => self.execute_graph_clear_series(Series::D),
+            Action::GraphResetE => self.execute_graph_clear_series(Series::E),
+            Action::GraphResetF => self.execute_graph_clear_series(Series::F),
+            Action::GraphResetRanges => {
+                self.wb_mut().current_graph.reset_ranges();
+                self.close_menu();
+            }
+            Action::GraphResetOptions => {
+                self.wb_mut().current_graph.reset_options();
                 self.close_menu();
             }
             Action::GraphView => self.enter_graph_view(),
