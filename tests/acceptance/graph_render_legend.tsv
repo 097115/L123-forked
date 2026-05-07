@@ -1,0 +1,76 @@
+# /Graph F10 view — Legends render below the plot.
+#
+# Slice F2 of GRAPH_PLAN.md. The F10 unicode renderer reserves one
+# row below the plot (above any X-Axis title) listing every
+# populated legend slot in `A: name  B: name  …` form. Empty slots
+# are skipped. When no legend is set, no row is reserved.
+
+SIZE 80 30
+
+# Seed A1..A5 = 1..5.
+KEYS 1
+ENTER
+KEYS 2
+ENTER
+KEYS 3
+ENTER
+KEYS 4
+ENTER
+KEYS 5
+ENTER
+HOME
+
+# Bar graph, series A populated.
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+DOWN
+ENTER
+
+# Default: no legends → "Sales" should not appear yet.
+F 10
+ASSERT_MODE        GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  Sales
+ESC
+ASSERT_MODE        READY
+
+# Set series A's legend to "Sales".
+KEY /
+KEY G
+KEY O
+KEY L
+KEY A
+KEYS Sales
+ENTER
+ASSERT_GRAPH_LEGEND  A  Sales
+
+# F10 — legend row visible.
+F 10
+ASSERT_MODE        GRAPH
+ASSERT_SCREEN      A: Sales
+ASSERT_SCREEN      █
+ESC
+ASSERT_MODE        READY
+
+# Setting the C legend without populating the C series still surfaces
+# its label (the row shows whatever the user explicitly set).
+KEY /
+KEY G
+KEY O
+KEY L
+KEY C
+KEYS Forecast
+ENTER
+F 10
+ASSERT_MODE        GRAPH
+ASSERT_SCREEN      A: Sales
+ASSERT_SCREEN      C: Forecast
+ESC
+ASSERT_MODE        READY

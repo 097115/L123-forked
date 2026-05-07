@@ -58,7 +58,8 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         );
         return;
     }
-    let plot_area = reserve_title_rows(area, &def.options.titles, buf);
+    let with_titles = reserve_title_rows(area, &def.options.titles, buf);
+    let plot_area = reserve_legend_row(with_titles, &def.options.legend, buf);
     if plot_area.height < 3 {
         // No room left for a meaningful plot.
         return;
@@ -72,6 +73,39 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
             &format!("{other:?} graphs render in a later slice; press Esc to return."),
         ),
     }
+}
+
+/// Paint the legend row and shrink `area` upward by one row when at
+/// least one legend slot is set. The row is laid out left-aligned as
+/// `A: name  B: name  …`, skipping unset slots. Truncates to fit the
+/// area width.
+fn reserve_legend_row(area: Rect, legend: &[Option<String>; 6], buf: &mut Buffer) -> Rect {
+    let parts: Vec<String> = legend
+        .iter()
+        .enumerate()
+        .filter_map(|(i, opt)| {
+            opt.as_deref()
+                .map(|name| format!("{}: {}", (b'A' + i as u8) as char, name))
+        })
+        .collect();
+    if parts.is_empty() || area.height < 4 {
+        return area;
+    }
+    let mut joined = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            joined.push_str("  ");
+        }
+        joined.push_str(p);
+    }
+    let max_len = area.width.saturating_sub(2) as usize;
+    if joined.chars().count() > max_len {
+        joined = joined.chars().take(max_len).collect();
+    }
+    let y = area.bottom().saturating_sub(1);
+    let style = Style::default().fg(Color::White);
+    buf.set_string(area.left() + 1, y, joined, style);
+    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
 
 /// Paint First / Second / X-Axis titles into `area` and return the

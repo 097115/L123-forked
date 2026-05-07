@@ -1256,6 +1256,7 @@ transcripts! {
     graph_name => "graph_name.tsv",
     graph_group => "graph_group.tsv",
     graph_render_titles => "graph_render_titles.tsv",
+    graph_render_legend => "graph_render_legend.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",

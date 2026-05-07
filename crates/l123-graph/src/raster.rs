@@ -219,9 +219,15 @@ where
                 }
             })
             .collect();
+        let label = def
+            .options
+            .legend
+            .get(i)
+            .and_then(|opt| opt.clone())
+            .unwrap_or_else(|| format!("Series {}", (b'A' + i as u8) as char));
         chart
             .draw_series(LineSeries::new(points.clone(), color.stroke_width(2)))?
-            .label(format!("Series {}", (b'A' + i as u8) as char))
+            .label(label)
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         // Visible markers at each point.
         chart.draw_series(
@@ -852,6 +858,36 @@ mod tests {
         let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0, 4.0]));
         assert!(svg.contains("Quarter"), "missing x-axis description in SVG");
         assert!(svg.contains("Dollars"), "missing y-axis description in SVG");
+    }
+
+    #[test]
+    fn svg_line_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Net Sales".into()),
+                    Some("YTD".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![4.0, 5.0, 6.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("Net Sales"), "missing A legend in SVG");
+        assert!(svg.contains("YTD"), "missing B legend in SVG");
+        assert!(
+            !svg.contains("Series A") && !svg.contains("Series B"),
+            "fallback legend leaked through"
+        );
     }
 
     #[test]
