@@ -574,6 +574,10 @@ pub enum Action {
     GraphFeaturesFrameTopNo,
     GraphFeaturesFrameBottomYes,
     GraphFeaturesFrameBottomNo,
+    /// `/Graph Type Features Frame Y-Axis {Yes|No}` — toggle the
+    /// inner y-axis line drawn just inside the Left edge.
+    GraphFeaturesFrameYAxisYes,
+    GraphFeaturesFrameYAxisNo,
     /// `/Graph Type Features Frame All` — turn every frame side on.
     GraphFeaturesFrameAll,
     /// `/Graph Type Features Frame Clear` — turn every frame side off.
@@ -3914,6 +3918,24 @@ const GTF_Y_RANGES_MENU: &[MenuItem] = &[
     },
 ];
 
+// Frame Y-Axis Yes/No submenu.
+const GTF_FRAME_Y_AXIS_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the inner y-axis line",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameYAxisNo),
+    },
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the inner y-axis line",
+        help_page: "0065-graph-type-features-continued.html",
+        body: MenuBody::Action(Action::GraphFeaturesFrameYAxisYes),
+    },
+];
+
 // Frame side Yes/No submenus.
 const GTF_FRAME_LEFT_MENU: &[MenuItem] = &[
     MenuItem {
@@ -4027,15 +4049,14 @@ const GTF_FRAME_MENU: &[MenuItem] = &[
         body: MenuBody::Action(Action::GraphFeaturesFrameClear),
     },
     // The Y-Axis frame line is conceptually distinct from the four
-    // outer edges and the panel does not yet have a row for it.
-    // Slice F flesh-out lands the model field; until then the leaf
-    // sits in the menu tree as a stub for muscle memory.
+    // outer edges — it sits just inside the Left edge between the
+    // outer frame and the data plot.
     MenuItem {
         letter: 'Y',
         name: "Y-Axis",
         help: "Toggle the inner y-axis line",
         help_page: "0065-graph-type-features-continued.html",
-        body: MenuBody::NotImplemented("gtf-frame-y-axis"),
+        body: MenuBody::Submenu(GTF_FRAME_Y_AXIS_MENU),
     },
     MenuItem {
         letter: 'Q',

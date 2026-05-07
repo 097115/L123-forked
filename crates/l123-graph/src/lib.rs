@@ -93,15 +93,19 @@ pub enum ScaleMode {
 
 /// Which sides of a `/Graph Type Features Frame` are drawn.
 ///
-/// 1-2-3 ships graphs with all four sides on (the user can clear any
-/// of them with `/Graph Type Features Frame {Side} No`); the manual
-/// `Default` impl below sets every flag to `true` to match.
+/// 1-2-3 ships graphs with all four outer sides on (the user can
+/// clear any of them with `/Graph Type Features Frame {Side} No`);
+/// the manual `Default` impl below sets every outer flag to `true`
+/// to match. `y_axis` is the **inner** y-axis line that 1-2-3 draws
+/// just inside the Left edge — distinct from the outer Left edge.
+/// It is off by default; `/GTF Frame Y-Axis Yes` turns it on.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FrameMask {
     pub left: bool,
     pub right: bool,
     pub top: bool,
     pub bottom: bool,
+    pub y_axis: bool,
 }
 
 impl Default for FrameMask {
@@ -111,6 +115,7 @@ impl Default for FrameMask {
             right: true,
             top: true,
             bottom: true,
+            y_axis: false,
         }
     }
 }

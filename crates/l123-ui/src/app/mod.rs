@@ -2107,6 +2107,7 @@ impl App {
             GraphFrameSide::Right => f.right = on,
             GraphFrameSide::Top => f.top = on,
             GraphFrameSide::Bottom => f.bottom = on,
+            GraphFrameSide::YAxis => f.y_axis = on,
         }
         self.close_menu();
     }
@@ -3494,6 +3495,8 @@ impl App {
             Action::GraphFeaturesFrameTopNo => self.set_graph_frame_side(GraphFrameSide::Top, false),
             Action::GraphFeaturesFrameBottomYes => self.set_graph_frame_side(GraphFrameSide::Bottom, true),
             Action::GraphFeaturesFrameBottomNo => self.set_graph_frame_side(GraphFrameSide::Bottom, false),
+            Action::GraphFeaturesFrameYAxisYes => self.set_graph_frame_side(GraphFrameSide::YAxis, true),
+            Action::GraphFeaturesFrameYAxisNo => self.set_graph_frame_side(GraphFrameSide::YAxis, false),
             Action::GraphFeaturesFrameAll => self.set_graph_frame_all(true),
             Action::GraphFeaturesFrameClear => self.set_graph_frame_all(false),
             Action::GraphOptionsColor => {

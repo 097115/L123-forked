@@ -930,6 +930,7 @@ impl App {
             Line::from(vec![Span::raw(slot('E', yax(4))), mark(f.frame.right, "Right")]),
             Line::from(vec![Span::raw(slot('F', yax(5))), mark(f.frame.top, "Top")]),
             Line::from(vec![Span::raw("          "), mark(f.frame.bottom, "Bottom")]),
+            Line::from(vec![Span::raw("          "), mark(f.frame.y_axis, "Y-axis")]),
             Line::from(""),
             Line::from(mark(f.stacked, "Stack data ranges")),
             Line::from(mark(f.percent, "Percentage")),

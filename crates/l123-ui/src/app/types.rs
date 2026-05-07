@@ -616,6 +616,8 @@ pub(super) enum GraphFrameSide {
     Right,
     Top,
     Bottom,
+    /// Inner y-axis line, distinct from the outer Left edge.
+    YAxis,
 }
 
 /// Which `/Graph Options Scale {Y|X|2Y}-Scale` axis the menu dispatch

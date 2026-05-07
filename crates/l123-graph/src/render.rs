@@ -177,11 +177,25 @@ fn render_frame(frame: &crate::FrameMask, area: Rect, buf: &mut Buffer) -> Rect 
         }
     }
 
-    // Compute inner rectangle by inset on every enabled side.
+    // Inner y-axis line: one column reserved just inside the Left
+    // edge (or at the very left when frame.left is off). Same row
+    // range as the outer Left edge so the two read as concentric
+    // verticals.
     let inset_top = if frame.top { 1 } else { 0 };
     let inset_bottom = if frame.bottom { 1 } else { 0 };
-    let inset_left = if frame.left { 1 } else { 0 };
+    let inset_left_outer = if frame.left { 1 } else { 0 };
     let inset_right = if frame.right { 1 } else { 0 };
+    if frame.y_axis && area.width > inset_left_outer {
+        let yax_x = left_x + inset_left_outer;
+        for y in (top_y + 1)..bottom_y {
+            buf[(yax_x, y)].set_symbol("│");
+            buf[(yax_x, y)].set_style(style);
+        }
+    }
+
+    // Compute inner rectangle. The inner Y-axis line consumes one
+    // extra left column beyond the outer Left edge.
+    let inset_left = inset_left_outer + if frame.y_axis { 1 } else { 0 };
     Rect::new(
         area.x + inset_left,
         area.y + inset_top,
