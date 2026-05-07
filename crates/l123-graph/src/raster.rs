@@ -264,6 +264,13 @@ where
     };
     let (y_lo, y_hi) = axis_bounds(&[a]);
     let y_lo = y_lo.min(0.0);
+    let bar_color = SERIES_PALETTE[0];
+    let label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "Series A".into());
     let mut builder = ChartBuilder::on(root);
     builder
         .margin(20)
@@ -272,50 +279,87 @@ where
     if let Some(c) = caption_string(def) {
         builder.caption(c, ("sans-serif", 24));
     }
-    let mut chart =
-        builder.build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
-    let mut mesh = chart.configure_mesh();
-    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
-    // draws a full mesh by default, so we explicitly disable each
-    // direction whose flag the user hasn't set.
-    if !def.options.grid.vertical {
-        mesh.disable_x_mesh();
+    match def.features.orientation {
+        crate::Orientation::Vertical => {
+            let mut chart = builder
+                .build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
+            let mut mesh = chart.configure_mesh();
+            if !def.options.grid.vertical {
+                mesh.disable_x_mesh();
+            }
+            if !def.options.grid.horizontal {
+                mesh.disable_y_mesh();
+            }
+            if let Some(t) = def.options.titles.x_axis.as_deref() {
+                mesh.x_desc(t);
+            }
+            if let Some(t) = def.options.titles.y_axis.as_deref() {
+                mesh.y_desc(t);
+            }
+            mesh.draw()?;
+            chart
+                .draw_series(
+                    Histogram::vertical(&chart)
+                        .style(bar_color.filled())
+                        .margin(6)
+                        .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                            if v.is_finite() {
+                                Some((i as i32, v))
+                            } else {
+                                None
+                            }
+                        })),
+                )?
+                .label(label)
+                .legend(move |(x, y)| {
+                    Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+                });
+            chart.configure_series_labels().border_style(BLACK).draw()?;
+        }
+        crate::Orientation::Horizontal => {
+            // Horizontal bars: value axis becomes the X axis, the
+            // segmented category axis becomes Y. Histogram::horizontal
+            // emits one rectangle per (value, segment) pair, growing
+            // rightward from the y-axis baseline. Grid axes swap
+            // meaning along with the orientation.
+            let mut chart = builder
+                .build_cartesian_2d(y_lo..y_hi, (0..a.len() as i32).into_segmented())?;
+            let mut mesh = chart.configure_mesh();
+            // Vertical grid lines (in 1-2-3 terms) → x-axis grid in
+            // plotters terms when the value axis is X.
+            if !def.options.grid.vertical {
+                mesh.disable_x_mesh();
+            }
+            if !def.options.grid.horizontal {
+                mesh.disable_y_mesh();
+            }
+            if let Some(t) = def.options.titles.x_axis.as_deref() {
+                mesh.x_desc(t);
+            }
+            if let Some(t) = def.options.titles.y_axis.as_deref() {
+                mesh.y_desc(t);
+            }
+            mesh.draw()?;
+            chart
+                .draw_series(
+                    Histogram::horizontal(&chart)
+                        .style(bar_color.filled())
+                        .margin(6)
+                        .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                            if v.is_finite() {
+                                Some((i as i32, v))
+                            } else {
+                                None
+                            }
+                        })),
+                )?
+                .label(label)
+                .legend(move |(x, y)| {
+                    Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+                });
+            chart.configure_series_labels().border_style(BLACK).draw()?;
+        }
     }
-    if !def.options.grid.horizontal {
-        mesh.disable_y_mesh();
-    }
-    if let Some(t) = def.options.titles.x_axis.as_deref() {
-        mesh.x_desc(t);
-    }
-    if let Some(t) = def.options.titles.y_axis.as_deref() {
-        mesh.y_desc(t);
-    }
-    mesh.draw()?;
-    let bar_color = SERIES_PALETTE[0];
-    let label = def
-        .options
-        .legend
-        .first()
-        .and_then(|o| o.clone())
-        .unwrap_or_else(|| "Series A".into());
-    chart
-        .draw_series(
-            Histogram::vertical(&chart)
-                .style(bar_color.filled())
-                .margin(6)
-                .data(a.iter().enumerate().filter_map(|(i, &v)| {
-                    if v.is_finite() {
-                        Some((i as i32, v))
-                    } else {
-                        None
-                    }
-                })),
-        )?
-        .label(label)
-        .legend(move |(x, y)| {
-            Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
-        });
-    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -1212,6 +1256,70 @@ mod tests {
         assert!(
             !svg.contains("Series A") && !svg.contains("Series B"),
             "fallback legend leaked through"
+        );
+    }
+
+    #[test]
+    fn svg_bar_horizontal_differs_from_vertical() {
+        // Same data, two orientations. The SVGs should render
+        // distinct geometry: vertical bars extend up from the
+        // x-axis, horizontal bars extend right from the y-axis.
+        let vals = a(vec![1.0, 2.0, 3.0]);
+        let v_def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let h_def = GraphDef {
+            graph_type: GraphType::Bar,
+            features: crate::GraphFeatures {
+                orientation: crate::Orientation::Horizontal,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let v_svg = render_svg(&v_def, &vals);
+        let h_svg = render_svg(&h_def, &vals);
+
+        // Pull every bar-coloured rect (#0000FF fill from
+        // SERIES_PALETTE[0]) and find the LARGEST one in each SVG.
+        // Plotters emits the rect attrs as `x=".." y=".." width="N"
+        // height="N"`. The largest such rect is the tallest bar in
+        // vertical orientation, or the widest bar in horizontal —
+        // its aspect ratio reveals which axis is the value axis.
+        fn largest_bar_dims(svg: &str) -> Option<(u32, u32)> {
+            let mut best: Option<(u32, u32, u32)> = None;
+            for piece in svg.split("<rect ").skip(1) {
+                if !piece.contains("fill=\"#0000FF\"") {
+                    continue;
+                }
+                let pull = |name: &str| -> Option<u32> {
+                    let needle = format!(" {name}=\"");
+                    let i = piece.find(&needle)? + needle.len();
+                    let rest = &piece[i..];
+                    let end = rest.find('"')?;
+                    rest[..end].parse().ok()
+                };
+                let w = pull("width")?;
+                let h = pull("height")?;
+                let area = w * h;
+                if best.is_none_or(|(_, _, a)| area > a) {
+                    best = Some((w, h, area));
+                }
+            }
+            best.map(|(w, h, _)| (w, h))
+        }
+
+        let (v_w, v_h) =
+            largest_bar_dims(&v_svg).expect("vertical SVG missing #0000FF bar rect");
+        let (h_w, h_h) =
+            largest_bar_dims(&h_svg).expect("horizontal SVG missing #0000FF bar rect");
+        assert!(
+            v_h > v_w * 2,
+            "vertical bar should be much taller than wide; got {v_w}x{v_h}"
+        );
+        assert!(
+            h_w > h_h * 2,
+            "horizontal bar should be much wider than tall; got {h_w}x{h_h}"
         );
     }
 
