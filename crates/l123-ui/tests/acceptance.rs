@@ -1290,6 +1290,7 @@ transcripts! {
     graph_render_y_axis_title => "graph_render_y_axis_title.tsv",
     graph_render_pie_labels => "graph_render_pie_labels.tsv",
     graph_render_pie_unicode => "graph_render_pie_unicode.tsv",
+    graph_render_xy_unicode => "graph_render_xy_unicode.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",

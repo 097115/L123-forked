@@ -104,6 +104,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         GraphType::Stack => render_bar_stacked(vals, inner, buf, def.features.percent),
         GraphType::Line => render_line(vals, inner, buf),
         GraphType::Pie => render_pie(vals, inner, buf),
+        GraphType::XY => render_xy(vals, inner, buf),
         other => write_centered(
             inner,
             buf,
@@ -871,6 +872,87 @@ fn render_line(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
     }
 }
 
+/// XY scatter, terminal flavor: one `•` per (X[i], A[i]) pair,
+/// placed at the proportional position of x within the X-range
+/// extent and y within the A-range extent. The distinguishing
+/// feature vs. Line is that x positions come from the X range, not
+/// from a uniform sample-index grid — points can repeat, cluster,
+/// or land out of input order.
+///
+/// Falls back to a centered error message when X is unset or has no
+/// finite values; when A is unset, says so. When all (x, y) pairs
+/// collapse to a single distinct x or y the corresponding axis span
+/// becomes a unit interval so the points still render at the
+/// midline.
+fn render_xy(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    let Some(xs) = vals.x.as_deref() else {
+        write_centered(area, buf, "XY graphs need an X range.");
+        return;
+    };
+    let Some(ys) = vals.data[0].as_deref() else {
+        write_centered(area, buf, "XY graphs need series A.");
+        return;
+    };
+    let n = xs.len().min(ys.len());
+    if n == 0 {
+        write_centered(area, buf, "XY needs aligned X and A values.");
+        return;
+    }
+    let plot_top = area.top();
+    let plot_bottom = area.bottom().saturating_sub(1);
+    let plot_height = plot_bottom.saturating_sub(plot_top);
+    if plot_height < 2 || area.width < 2 {
+        return;
+    }
+
+    let pairs: Vec<(f64, f64)> = (0..n)
+        .filter(|i| xs[*i].is_finite() && ys[*i].is_finite())
+        .map(|i| (xs[i], ys[i]))
+        .collect();
+    if pairs.is_empty() {
+        write_centered(area, buf, "XY needs finite X and A values.");
+        return;
+    }
+    let (x_min, x_max) = pairs
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (x, _)| {
+            (lo.min(*x), hi.max(*x))
+        });
+    let (y_min, y_max) = pairs
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, y)| {
+            (lo.min(*y), hi.max(*y))
+        });
+    let x_span = if (x_max - x_min).abs() < f64::EPSILON {
+        1.0
+    } else {
+        x_max - x_min
+    };
+    let y_span = if (y_max - y_min).abs() < f64::EPSILON {
+        1.0
+    } else {
+        y_max - y_min
+    };
+    let style = Style::default().fg(Color::Cyan);
+    for (x, y) in pairs {
+        let frac_x = (x - x_min) / x_span;
+        let frac_y = (y - y_min) / y_span;
+        let bx = area.left() + (frac_x * (area.width as f64 - 1.0)).round() as u16;
+        let y_from_bottom = (frac_y * (plot_height as f64 - 1.0)).round() as u16;
+        let by = plot_bottom.saturating_sub(1 + y_from_bottom);
+        if bx < area.right() && by >= area.top() && by < area.bottom() {
+            let cell = &mut buf[(bx, by)];
+            cell.set_symbol("•");
+            cell.set_style(style);
+        }
+    }
+    for x in area.left()..area.right() {
+        let cell = &mut buf[(x, plot_bottom)];
+        cell.set_symbol("─");
+        cell.set_style(Style::default().fg(Color::Gray));
+    }
+}
+
 /// Pie chart, terminal flavor: a single horizontal proportional bar
 /// where each wedge is a contiguous run of cells, glyph per wedge in
 /// the same A=`█` B=`▓` C=`▒` D=`░` palette as the bar/stack
@@ -1178,6 +1260,49 @@ mod tests {
         assert!(
             big > small,
             "bigger value should produce taller bar ({big} vs {small})"
+        );
+    }
+
+    #[test]
+    fn xy_uses_x_values_for_horizontal_position() {
+        // X = [0, 10, 100], Y = [50, 50, 50]. With Line semantics
+        // the three dots would be evenly spaced. With XY semantics
+        // they should cluster — points at x=0 and x=10 are within
+        // ~10% of total span, while x=100 sits at the right edge.
+        let area = Rect::new(0, 0, 60, 16);
+        let mut buf = Buffer::empty(area);
+        let vals = GraphValues {
+            x: Some(vec![0.0, 10.0, 100.0]),
+            data: [
+                Some(vec![50.0, 50.0, 50.0]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let def = GraphDef {
+            graph_type: GraphType::XY,
+            ..Default::default()
+        };
+        render(&def, &vals, area, &mut buf);
+        let mut dot_xs: Vec<u16> = (0..buf.area.width)
+            .filter(|x| {
+                (0..buf.area.height).any(|y| buf[(*x, y)].symbol() == "•")
+            })
+            .collect();
+        dot_xs.sort_unstable();
+        assert_eq!(dot_xs.len(), 3, "expected 3 distinct dot columns; got {dot_xs:?}");
+        // First two cluster near the left, third lands far to the
+        // right — the gap between the second and third dot is much
+        // larger than between the first and second.
+        let near = dot_xs[1] - dot_xs[0];
+        let far = dot_xs[2] - dot_xs[1];
+        assert!(
+            far > near * 3,
+            "XY should cluster near-x dots and stretch far ones (near={near}, far={far})"
         );
     }
 }
