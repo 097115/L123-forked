@@ -58,15 +58,61 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         );
         return;
     }
+    let plot_area = reserve_title_rows(area, &def.options.titles, buf);
+    if plot_area.height < 3 {
+        // No room left for a meaningful plot.
+        return;
+    }
     match def.graph_type {
-        GraphType::Bar => render_bar(vals, area, buf),
-        GraphType::Line => render_line(vals, area, buf),
+        GraphType::Bar => render_bar(vals, plot_area, buf),
+        GraphType::Line => render_line(vals, plot_area, buf),
         other => write_centered(
-            area,
+            plot_area,
             buf,
             &format!("{other:?} graphs render in a later slice; press Esc to return."),
         ),
     }
+}
+
+/// Paint First / Second / X-Axis titles into `area` and return the
+/// remaining rectangle the plot is allowed to occupy. Y-Axis,
+/// 2Y-Axis, Note, and Other-Note are deferred to a later slice.
+fn reserve_title_rows(area: Rect, titles: &crate::Titles, buf: &mut Buffer) -> Rect {
+    let mut top = area.top();
+    let mut bottom = area.bottom();
+    let style = Style::default().fg(Color::White);
+    if let Some(t) = titles.first.as_deref() {
+        if top < bottom {
+            write_centered_row(area, top, buf, t, style);
+            top = top.saturating_add(1);
+        }
+    }
+    if let Some(t) = titles.second.as_deref() {
+        if top < bottom {
+            write_centered_row(area, top, buf, t, style);
+            top = top.saturating_add(1);
+        }
+    }
+    if let Some(t) = titles.x_axis.as_deref() {
+        if bottom > top {
+            bottom = bottom.saturating_sub(1);
+            write_centered_row(area, bottom, buf, t, style);
+        }
+    }
+    Rect::new(area.x, top, area.width, bottom.saturating_sub(top))
+}
+
+fn write_centered_row(area: Rect, y: u16, buf: &mut Buffer, msg: &str, style: Style) {
+    let len = msg.chars().count() as u16;
+    let max_len = area.width.saturating_sub(2);
+    let display: String = if len > max_len {
+        msg.chars().take(max_len as usize).collect()
+    } else {
+        msg.to_owned()
+    };
+    let display_len = display.chars().count() as u16;
+    let x0 = area.left() + area.width.saturating_sub(display_len) / 2;
+    buf.set_string(x0, y, display, style);
 }
 
 fn clear(area: Rect, buf: &mut Buffer) {

@@ -92,13 +92,26 @@ where
         return Ok(());
     }
     match def.graph_type {
-        GraphType::Line => draw_line(vals, root),
-        GraphType::Bar => draw_bar(vals, root),
-        GraphType::XY => draw_xy(vals, root),
-        GraphType::Stack => draw_stack(vals, root),
-        GraphType::Pie => draw_pie(vals, root),
-        GraphType::HLCO => draw_hlco(vals, root),
-        GraphType::Mixed => draw_mixed(vals, root),
+        GraphType::Line => draw_line(def, vals, root),
+        GraphType::Bar => draw_bar(def, vals, root),
+        GraphType::XY => draw_xy(def, vals, root),
+        GraphType::Stack => draw_stack(def, vals, root),
+        GraphType::Pie => draw_pie(def, vals, root),
+        GraphType::HLCO => draw_hlco(def, vals, root),
+        GraphType::Mixed => draw_mixed(def, vals, root),
+    }
+}
+
+/// Top caption for the chart, derived from First / Second titles.
+/// Pie charts don't carry x/y descriptions, but they do carry
+/// captions; everything else uses both.
+fn caption_string(def: &GraphDef) -> Option<String> {
+    let t = &def.options.titles;
+    match (t.first.as_deref(), t.second.as_deref()) {
+        (Some(a), Some(b)) => Some(format!("{a} — {b}")),
+        (Some(a), None) => Some(a.to_owned()),
+        (None, Some(b)) => Some(b.to_owned()),
+        (None, None) => None,
     }
 }
 
@@ -160,7 +173,11 @@ fn collected_data(vals: &GraphValues) -> Vec<&[f64]> {
     vals.data.iter().filter_map(|o| o.as_deref()).collect()
 }
 
-fn draw_line<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_line<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -171,12 +188,24 @@ where
         return paint_error(root, "No A..F data.");
     }
     let (y_lo, y_hi) = axis_bounds(&series);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     for (i, s) in series.iter().enumerate() {
         let color = SERIES_PALETTE[i % SERIES_PALETTE.len()];
         let points: Vec<(f64, f64)> = s
@@ -205,7 +234,11 @@ where
     Ok(())
 }
 
-fn draw_bar<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_bar<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -216,12 +249,24 @@ where
     };
     let (y_lo, y_hi) = axis_bounds(&[a]);
     let y_lo = y_lo.min(0.0);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     chart.draw_series(
         Histogram::vertical(&chart)
             .style(BLUE.filled())
@@ -237,7 +282,11 @@ where
     Ok(())
 }
 
-fn draw_xy<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_xy<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -252,12 +301,23 @@ where
     };
     let (x_lo, x_hi) = axis_bounds(&[x]);
     let (y_lo, y_hi) = axis_bounds(&[y]);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart = builder.build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     let n = x.len().min(y.len());
     let points: Vec<(f64, f64)> = (0..n)
         .filter_map(|i| {
@@ -276,7 +336,11 @@ where
     Ok(())
 }
 
-fn draw_stack<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_stack<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -304,12 +368,24 @@ where
     if y_max == 0.0 {
         y_max = 1.0;
     }
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     // Draw each layer as its own Histogram on top of the cumulative sums.
     let mut base: Vec<f64> = vec![0.0; n];
     for (si, s) in series.iter().enumerate() {
@@ -336,7 +412,11 @@ where
     Ok(())
 }
 
-fn draw_pie<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_pie<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -353,7 +433,16 @@ where
     if positive.is_empty() {
         return paint_error(root, "Pie needs positive values.");
     }
+    // Pie charts have no Cartesian axes, so x_desc/y_desc don't apply;
+    // the caption is drawn directly via root.draw_text instead.
     let (w, h) = root.dim_in_pixel();
+    if let Some(caption) = caption_string(def) {
+        root.draw_text(
+            &caption,
+            &TextStyle::from(("sans-serif", 24).into_font()).color(&BLACK),
+            (10, 10),
+        )?;
+    }
     let cx = (w / 2) as i32;
     let cy = (h / 2) as i32;
     let radius = (w.min(h) as f64 * 0.4).max(20.0);
@@ -375,7 +464,11 @@ where
     Ok(())
 }
 
-fn draw_hlco<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_hlco<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -411,12 +504,23 @@ where
         y_hi = y_lo + 1.0;
     }
 
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart = builder.build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     for (i, &h) in high.iter().enumerate().take(n) {
         let l = low.get(i).copied().unwrap_or(f64::NAN);
         let c = close.get(i).copied().unwrap_or(f64::NAN);
@@ -446,7 +550,11 @@ where
     Ok(())
 }
 
-fn draw_mixed<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_mixed<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -459,12 +567,24 @@ where
     let n = a.len().max(b.len());
     let (y_lo, y_hi) = axis_bounds(&[a, b]);
     let y_lo = y_lo.min(0.0);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     if !a.is_empty() {
         chart.draw_series(
             Histogram::vertical(&chart)
@@ -694,5 +814,65 @@ mod tests {
             let png = render_png(&def, &vals);
             assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{t:?} bad PNG magic");
         }
+    }
+
+    #[test]
+    fn svg_caption_combines_first_and_second_titles() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    first: Some("Sales 1991".into()),
+                    second: Some("by Quarter".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        assert!(svg.contains("Sales 1991"), "missing first title in SVG");
+        assert!(svg.contains("by Quarter"), "missing second title in SVG");
+    }
+
+    #[test]
+    fn svg_uses_x_axis_and_y_axis_descriptions() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    x_axis: Some("Quarter".into()),
+                    y_axis: Some("Dollars".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0, 4.0]));
+        assert!(svg.contains("Quarter"), "missing x-axis description in SVG");
+        assert!(svg.contains("Dollars"), "missing y-axis description in SVG");
+    }
+
+    #[test]
+    fn svg_pie_caption_drawn_directly_when_titles_set() {
+        // Pie chart has no Cartesian mesh; the caption is painted by
+        // root.draw_text rather than ChartBuilder.caption.
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    first: Some("Cost Breakdown".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        assert!(
+            svg.contains("Cost Breakdown"),
+            "pie caption missing in SVG"
+        );
     }
 }
