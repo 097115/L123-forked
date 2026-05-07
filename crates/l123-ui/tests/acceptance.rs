@@ -1265,6 +1265,7 @@ transcripts! {
     graph_render_table => "graph_render_table.tsv",
     graph_render_clustered_bar => "graph_render_clustered_bar.tsv",
     graph_render_drop_shadow => "graph_render_drop_shadow.tsv",
+    graph_render_notes => "graph_render_notes.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",

@@ -59,7 +59,8 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
         return;
     }
     let with_titles = reserve_title_rows(area, &def.options.titles, buf);
-    let with_legend = reserve_legend_row(with_titles, &def.options.legend, buf);
+    let with_notes = reserve_note_row(with_titles, &def.options.titles, buf);
+    let with_legend = reserve_legend_row(with_notes, &def.options.legend, buf);
     let plot_area = if def.features.table {
         reserve_value_table_rows(with_legend, vals, buf)
     } else {
@@ -241,6 +242,50 @@ fn render_grid_lines(grid: &crate::GridMask, area: Rect, buf: &mut Buffer) {
             }
         }
     }
+}
+
+/// Paint Note (bottom-left) and Other-Note (bottom-right) on a
+/// shared row at the bottom of `area`, then return the area shrunk
+/// by one row when at least one is set. Reference p. 2-216 places
+/// these as the bottom-most footnotes; in our terminal layout we
+/// position the note row directly above the X-Axis title (which
+/// reserve_title_rows already carved out at `area.bottom() - 1` —
+/// or, when no X-Axis title, at the very bottom).
+///
+/// When both Note and Other-Note share the row and would overlap
+/// at the chosen widths, Note wins on the left and Other-Note is
+/// truncated; that's a graceful fallback for narrow terminals.
+fn reserve_note_row(area: Rect, titles: &crate::Titles, buf: &mut Buffer) -> Rect {
+    let note = titles.note.as_deref();
+    let other = titles.other_note.as_deref();
+    if note.is_none() && other.is_none() {
+        return area;
+    }
+    if area.height < 4 {
+        return area;
+    }
+    let style = Style::default().fg(Color::White);
+    let y = area.bottom().saturating_sub(1);
+    if let Some(text) = note {
+        let display: String = text
+            .chars()
+            .take(area.width.saturating_sub(2) as usize)
+            .collect();
+        buf.set_string(area.left() + 1, y, display, style);
+    }
+    if let Some(text) = other {
+        let len = text.chars().count() as u16;
+        let max_len = area.width.saturating_sub(2);
+        let display: String = if len > max_len {
+            text.chars().take(max_len as usize).collect()
+        } else {
+            text.to_owned()
+        };
+        let display_len = display.chars().count() as u16;
+        let x = area.left() + area.width.saturating_sub(display_len + 1);
+        buf.set_string(x, y, display, style);
+    }
+    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
 
 /// Paint a small value table at the bottom of `area`, one row per
