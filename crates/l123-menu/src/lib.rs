@@ -669,6 +669,32 @@ pub enum Action {
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
 
+    // ---- /Graph Name (slice E1 of GRAPH_PLAN.md) --------------------
+    /// `/Graph Name Use` — text prompt; on commit replaces
+    /// `current_graph` with the named graph's settings.
+    GraphNameUse,
+    /// `/Graph Name Create` — text prompt; on commit stores
+    /// `current_graph.clone()` under the supplied name.
+    GraphNameCreate,
+    /// `/Graph Name Delete` — text prompt; on commit removes the
+    /// named graph from `Workbook::graphs`.
+    GraphNameDelete,
+    /// `/Graph Name Reset` — immediately deletes every named graph
+    /// in the current workbook. Reference is explicit: no confirmation.
+    GraphNameReset,
+
+    // ---- /Graph Group (slice E2 of GRAPH_PLAN.md) -------------------
+    /// `/Graph Group` — enters POINT for the group range. The
+    /// per-axis assignment happens inside the
+    /// `GraphGroupColumnwise|Rowwise` leaves of the rooted submenu.
+    GraphGroup,
+    /// `/Graph Group Columnwise` — first column of the stashed range
+    /// becomes X; succeeding columns A..F.
+    GraphGroupColumnwise,
+    /// `/Graph Group Rowwise` — first row of the stashed range
+    /// becomes X; succeeding rows A..F.
+    GraphGroupRowwise,
+
     // ---- WYSIWYG (`:`) colon-menu commands -----------------------------
     /// `:Format Bold Set` — apply bold to a range.
     FormatBoldSet,
@@ -4073,6 +4099,68 @@ const GRAPH_TYPE_FEATURES_MENU: &[MenuItem] = &[
     },
 ];
 
+/// /Graph Group orientation submenu. Public because the UI roots
+/// into it after the POINT step commits the group range. Reference
+/// p. 2-172 (0070-graph-group.html).
+pub const GRAPH_GROUP_ORIENT_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'C',
+        name: "Columnwise",
+        help: "First column → X; succeeding columns → A, B, … F",
+        help_page: "0070-graph-group.html",
+        body: MenuBody::Action(Action::GraphGroupColumnwise),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Rowwise",
+        help: "First row → X; succeeding rows → A, B, … F",
+        help_page: "0070-graph-group.html",
+        body: MenuBody::Action(Action::GraphGroupRowwise),
+    },
+];
+
+// /Graph Name — Reference p. 2-218 → 2-224 (0071-graph-name.html).
+// Use, Create, Delete are string prompts; Reset is immediate (no
+// confirmation per the Reference's explicit CAUTION); Table is
+// deferred to slice F (needs cell-write orchestration).
+const GRAPH_NAME_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'U',
+        name: "Use",
+        help: "Load a named graph as the current graph",
+        help_page: "0076-graph-name-use.html",
+        body: MenuBody::Action(Action::GraphNameUse),
+    },
+    MenuItem {
+        letter: 'C',
+        name: "Create",
+        help: "Save the current graph under a name",
+        help_page: "0072-graph-name-create.html",
+        body: MenuBody::Action(Action::GraphNameCreate),
+    },
+    MenuItem {
+        letter: 'D',
+        name: "Delete",
+        help: "Drop one named graph",
+        help_page: "0073-graph-name-delete.html",
+        body: MenuBody::Action(Action::GraphNameDelete),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Reset",
+        help: "Delete every named graph (no confirmation)",
+        help_page: "0074-graph-name-reset.html",
+        body: MenuBody::Action(Action::GraphNameReset),
+    },
+    MenuItem {
+        letter: 'T',
+        name: "Table",
+        help: "Write a table of named graphs to a worksheet range",
+        help_page: "0075-graph-name-table.html",
+        body: MenuBody::NotImplemented("gn-table"),
+    },
+];
+
 const GRAPH_TYPE_MENU: &[MenuItem] = &[
     MenuItem {
         letter: 'L',
@@ -4961,14 +5049,14 @@ const GRAPH_MENU: &[MenuItem] = &[
         name: "Name",
         help: "Create, use, delete, reset named graphs",
         help_page: "0071-graph-name.html",
-        body: MenuBody::NotImplemented("g-name"),
+        body: MenuBody::Submenu(GRAPH_NAME_MENU),
     },
     MenuItem {
         letter: 'G',
         name: "Group",
         help: "Columnwise / Rowwise auto-assign",
         help_page: "0070-graph-group.html",
-        body: MenuBody::NotImplemented("g-group"),
+        body: MenuBody::Action(Action::GraphGroup),
     },
     MenuItem {
         letter: 'Q',

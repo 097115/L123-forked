@@ -216,6 +216,11 @@ pub struct App {
     /// typed name is stashed here after the prompt step and consumed by
     /// commit_point.
     pending_name: Option<String>,
+    /// Transient slot for `/Graph Group`: the POINT step commits the
+    /// range here, then the rooted Columnwise/Rowwise submenu reads
+    /// it and walks the range. Cleared once consumed (or when the
+    /// orient submenu is dismissed).
+    pending_graph_group_range: Option<l123_core::Range>,
     /// After committing a filename that already exists on disk, this
     /// carries the chosen path through the Cancel/Replace/Backup
     /// submenu. Mode stays MENU while present.
@@ -1129,6 +1134,7 @@ impl App {
             prompt: None,
             error_message: None,
             pending_name: None,
+            pending_graph_group_range: None,
             save_confirm: None,
             erase_confirm: None,
             pending_xtract_path: None,
@@ -2147,6 +2153,98 @@ impl App {
             fresh: false,
         });
         self.mode = Mode::Menu;
+    }
+
+    /// `/Graph Group {Columnwise|Rowwise}` — split the stashed group
+    /// range and assign X plus A..F. Per Reference p. 2-172, the
+    /// first column (or row) becomes X; succeeding ones become A, B,
+    /// C, D, E, F. Up to 7 strips are used. Slots beyond what the
+    /// range provides stay cleared. Overrides any prior /Graph X or
+    /// A-F assignments.
+    fn apply_graph_group(&mut self, orient: GraphGroupOrientation) {
+        let Some(range) = self.pending_graph_group_range.take() else {
+            self.close_menu();
+            return;
+        };
+        let g = &mut self.wb_mut().current_graph;
+        g.x = None;
+        g.data = Default::default();
+
+        let (start, end) = (range.start, range.end);
+        let (lo_col, hi_col) = (start.col.min(end.col), start.col.max(end.col));
+        let (lo_row, hi_row) = (start.row.min(end.row), start.row.max(end.row));
+        let sheet = start.sheet;
+        let slots = [
+            l123_graph::Series::X,
+            l123_graph::Series::A,
+            l123_graph::Series::B,
+            l123_graph::Series::C,
+            l123_graph::Series::D,
+            l123_graph::Series::E,
+            l123_graph::Series::F,
+        ];
+
+        match orient {
+            GraphGroupOrientation::Columnwise => {
+                let n = (hi_col - lo_col + 1).min(7);
+                for (i, slot) in slots.iter().take(n as usize).enumerate() {
+                    let col = lo_col + i as u16;
+                    let strip = l123_core::Range {
+                        start: l123_core::Address {
+                            sheet,
+                            col,
+                            row: lo_row,
+                        },
+                        end: l123_core::Address {
+                            sheet,
+                            col,
+                            row: hi_row,
+                        },
+                    };
+                    g.set(*slot, strip);
+                }
+            }
+            GraphGroupOrientation::Rowwise => {
+                let n = ((hi_row - lo_row + 1).min(7)) as usize;
+                for (i, slot) in slots.iter().take(n).enumerate() {
+                    let row = lo_row + i as u32;
+                    let strip = l123_core::Range {
+                        start: l123_core::Address {
+                            sheet,
+                            col: lo_col,
+                            row,
+                        },
+                        end: l123_core::Address {
+                            sheet,
+                            col: hi_col,
+                            row,
+                        },
+                    };
+                    g.set(*slot, strip);
+                }
+            }
+        }
+        self.close_menu();
+    }
+
+    /// `/Graph Name {Use|Create|Delete}` — open a single-line text
+    /// prompt. The verb is just for the prompt label; the
+    /// `PromptNext` distinguishes the commit handler.
+    fn start_graph_name_prompt(&mut self, next: PromptNext, verb: &str) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("{verb} graph name:"),
+            buffer: String::new(),
+            next,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// Number of named graphs stored on the current workbook.
+    /// Test-surface accessor.
+    pub fn graph_names_count(&self) -> usize {
+        self.wb().graphs.len()
     }
 
     /// `/Graph Options Scale {axis} {Auto|Manual}` — set scale mode
@@ -3396,6 +3494,20 @@ impl App {
             Action::GraphOptionsScale2YAuto => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Automatic),
             Action::GraphOptionsScale2YManual => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Manual),
             Action::GraphOptionsScaleSkip => self.start_graph_skip_prompt(),
+            Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
+            Action::GraphNameCreate => {
+                self.start_graph_name_prompt(PromptNext::GraphNameCreate, "Create")
+            }
+            Action::GraphNameDelete => {
+                self.start_graph_name_prompt(PromptNext::GraphNameDelete, "Delete")
+            }
+            Action::GraphNameReset => {
+                self.wb_mut().graphs.clear();
+                self.close_menu();
+            }
+            Action::GraphGroup => self.begin_point(PendingCommand::GraphGroup),
+            Action::GraphGroupColumnwise => self.apply_graph_group(GraphGroupOrientation::Columnwise),
+            Action::GraphGroupRowwise => self.apply_graph_group(GraphGroupOrientation::Rowwise),
             // Forward-declared in the menu enum but not yet implemented.
             // Hitting these from the menu currently is a no-op back to
             // READY; flesh out behavior when the feature lands.
@@ -5717,6 +5829,11 @@ impl App {
                     *s = Some(first);
                 }
                 self.mode = Mode::Ready;
+            }
+            PendingCommand::GraphGroup => {
+                self.pending_graph_group_range = Some(first);
+                self.menu = Some(MenuState::rooted_at(menu::GRAPH_GROUP_ORIENT_MENU));
+                self.mode = Mode::Menu;
             }
             PendingCommand::ColumnRangeSetWidth { width } => {
                 for r in ranges {
@@ -8321,6 +8438,29 @@ impl App {
                 let parsed: u32 = p.buffer.parse().unwrap_or(current);
                 let clamped = parsed.clamp(1, 8192);
                 self.wb_mut().current_graph.options.skip = clamped;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameUse => {
+                if !p.buffer.is_empty() {
+                    if let Some(g) = self.wb().graphs.get(&p.buffer).cloned() {
+                        self.wb_mut().current_graph = g;
+                    }
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameCreate => {
+                let mut name = p.buffer;
+                if !name.is_empty() {
+                    name.truncate(15);
+                    let snapshot = self.wb().current_graph.clone();
+                    self.wb_mut().graphs.insert(name, snapshot);
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameDelete => {
+                if !p.buffer.is_empty() {
+                    self.wb_mut().graphs.remove(&p.buffer);
+                }
                 self.mode = Mode::Ready;
             }
             PromptNext::RangeNameCreate => {

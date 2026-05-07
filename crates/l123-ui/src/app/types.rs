@@ -1371,6 +1371,17 @@ pub(super) enum PromptNext {
     /// `/Graph Options Scale Skip` — numeric prompt. Commit clamps to
     /// `1..=8192` and writes `current_graph.options.skip`.
     GraphOptionsScaleSkip,
+    /// `/Graph Name Use` — text prompt; commit replaces
+    /// `current_graph` with the matching entry from `Workbook::graphs`.
+    /// Unknown names are no-ops.
+    GraphNameUse,
+    /// `/Graph Name Create` — text prompt; commit stores
+    /// `current_graph.clone()` under the supplied name (≤15 chars,
+    /// truncated). Empty buffer is a no-op.
+    GraphNameCreate,
+    /// `/Graph Name Delete` — text prompt; commit removes one named
+    /// graph from `Workbook::graphs`. Unknown names are no-ops.
+    GraphNameDelete,
 }
 
 /// `/Worksheet Titles` axis selector.  Both freezes the rows above
@@ -1476,7 +1487,10 @@ impl PromptNext {
             | PromptNext::RangeNameDelete
             | PromptNext::RangeNameUndefine
             | PromptNext::RangeNameNoteCreate
-            | PromptNext::RangeNameNoteDelete => {
+            | PromptNext::RangeNameNoteDelete
+            | PromptNext::GraphNameUse
+            | PromptNext::GraphNameCreate
+            | PromptNext::GraphNameDelete => {
                 c.is_ascii_alphanumeric() || c == '_' || c == '\\' || c == '.'
             }
             // Note body is free text; allow anything printable.
@@ -1771,6 +1785,11 @@ pub(super) enum PendingCommand {
     GraphDataLabels {
         slot: usize,
     },
+    /// POINT step of `/Graph Group`. On commit, the range is stashed
+    /// on `App::pending_graph_group_range` and the orientation
+    /// submenu (Columnwise|Rowwise) is rooted; the chosen leaf walks
+    /// the range and assigns X plus A..F.
+    GraphGroup,
     /// POINT step of `/Worksheet Column Column-Range Set-Width`. The
     /// width was captured from the prompt; on commit, apply it to every
     /// column in the selected range.
@@ -1923,6 +1942,7 @@ impl PendingCommand {
             PendingCommand::RangeSearchRange { .. } => "Enter search range:",
             PendingCommand::GraphSeries { .. } => "Enter graph range:",
             PendingCommand::GraphDataLabels { .. } => "Enter data-label range:",
+            PendingCommand::GraphGroup => "Enter graph group range:",
             PendingCommand::ColumnRangeSetWidth { .. } => "Enter range of columns to set:",
             PendingCommand::ColumnRangeResetWidth => "Enter range of columns to reset:",
             PendingCommand::ColumnHide => "Enter range of columns to hide:",

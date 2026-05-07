@@ -481,6 +481,23 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_NAMES_COUNT 2" — number of named graphs
+            // stored on the current workbook (Workbook::graphs).
+            "ASSERT_GRAPH_NAMES_COUNT" => {
+                let want: usize = rest.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_NAMES_COUNT expects an integer, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_names_count();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph names count expected {want} got {got}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_SCALE_MODE Y AUTO" — axis token (Y, X, or 2)
             // and expected mode (AUTO | MANUAL).
             "ASSERT_GRAPH_SCALE_MODE" => {
@@ -1236,6 +1253,8 @@ transcripts! {
     graph_options_data_labels => "graph_options_data_labels.tsv",
     graph_options_scale => "graph_options_scale.tsv",
     graph_options_advanced_shell => "graph_options_advanced_shell.tsv",
+    graph_name => "graph_name.tsv",
+    graph_group => "graph_group.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
     m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",
