@@ -750,25 +750,55 @@ where
         mesh.y_desc(t);
     }
     mesh.draw()?;
+    let bar_color = SERIES_PALETTE[0];
+    let line_color = SERIES_PALETTE[1];
     if !a.is_empty() {
-        chart.draw_series(
-            Histogram::vertical(&chart)
-                .style(BLUE.filled())
-                .margin(6)
-                .data(a.iter().enumerate().filter_map(|(i, &v)| {
-                    if v.is_finite() {
-                        Some((i as i32, v))
-                    } else {
-                        None
-                    }
-                })),
-        )?;
+        let bar_label = def
+            .options
+            .legend
+            .first()
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Series A".into());
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(bar_color.filled())
+                    .margin(6)
+                    .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                        if v.is_finite() {
+                            Some((i as i32, v))
+                        } else {
+                            None
+                        }
+                    })),
+            )?
+            .label(bar_label)
+            .legend(move |(x, y)| {
+                Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+            });
     }
     // Line overlay on series B.
     if !b.is_empty() {
-        // Histogram uses SegmentValue<i32>; a LineSeries over the same
-        // axis type needs the same coordinate shape, so we build a
-        // second chart in Cartesian 2D aligned to the first.
+        // Register the line legend on the bar chart via a phantom
+        // empty histogram so both rows render in the same legend
+        // box. The visual line itself draws on a second chart with
+        // Cartesian f64 coords, since Histogram uses SegmentValue.
+        let line_label = def
+            .options
+            .legend
+            .get(1)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Series B".into());
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(line_color.filled())
+                    .data(std::iter::empty::<(i32, f64)>()),
+            )?
+            .label(line_label)
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 12, y)], line_color.stroke_width(2))
+            });
         let mut over = ChartBuilder::on(root)
             .margin(20)
             .x_label_area_size(30)
@@ -786,12 +816,13 @@ where
                 }
             })
             .collect();
-        over.draw_series(LineSeries::new(pts.clone(), RED.stroke_width(2)))?;
+        over.draw_series(LineSeries::new(pts.clone(), line_color.stroke_width(2)))?;
         over.draw_series(
             pts.into_iter()
-                .map(|(x, y)| Circle::new((x, y), 3, RED.filled())),
+                .map(|(x, y)| Circle::new((x, y), 3, line_color.filled())),
         )?;
     }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -1069,6 +1100,32 @@ mod tests {
             with_grid_lines > no_grid_lines,
             "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
         );
+    }
+
+    #[test]
+    fn svg_mixed_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Mixed,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("ABars".into()),
+                    Some("BLine".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![3.0, 2.0, 1.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("ABars"), "Mixed SVG missing A-bars legend");
+        assert!(svg.contains("BLine"), "Mixed SVG missing B-line legend");
     }
 
     #[test]
