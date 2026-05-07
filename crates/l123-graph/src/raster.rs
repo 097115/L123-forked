@@ -454,6 +454,21 @@ where
     Ok(())
 }
 
+/// Wedge label for a pie slice. Prefers the cell-text string at
+/// `orig_i` in `x_labels` when set and non-empty; otherwise falls
+/// back to a 1-based positional index using the surviving wedge's
+/// position so the labels stay sequential ("1", "2", "3").
+fn wedge_label(x_labels: Option<&[String]>, orig_i: usize, wedge_i: usize) -> String {
+    if let Some(labels) = x_labels {
+        if let Some(s) = labels.get(orig_i) {
+            if !s.trim().is_empty() {
+                return s.clone();
+            }
+        }
+    }
+    format!("{}", wedge_i + 1)
+}
+
 fn draw_pie<DB>(
     def: &GraphDef,
     vals: &GraphValues,
@@ -467,12 +482,17 @@ where
         Some(a) if !a.is_empty() => a,
         _ => return paint_error(root, "Set /Graph A to plot a pie."),
     };
-    let positive: Vec<f64> = a
+    // Walk the A series alongside its index so each surviving wedge
+    // can pull its label from the parallel x_labels slot. Filter must
+    // happen after pairing so x_labels stays aligned even when some
+    // A values are non-positive and get dropped.
+    let pairs: Vec<(usize, f64)> = a
         .iter()
         .copied()
-        .filter(|v| v.is_finite() && *v > 0.0)
+        .enumerate()
+        .filter(|(_, v)| v.is_finite() && *v > 0.0)
         .collect();
-    if positive.is_empty() {
+    if pairs.is_empty() {
         return paint_error(root, "Pie needs positive values.");
     }
     // Pie charts have no Cartesian axes, so x_desc/y_desc don't apply;
@@ -488,10 +508,11 @@ where
     let cx = (w / 2) as i32;
     let cy = (h / 2) as i32;
     let radius = (w.min(h) as f64 * 0.4).max(20.0);
-    let labels: Vec<String> = positive
+    let positive: Vec<f64> = pairs.iter().map(|(_, v)| *v).collect();
+    let labels: Vec<String> = pairs
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("{}", i + 1))
+        .map(|(wedge_i, (orig_i, _))| wedge_label(vals.x_labels.as_deref(), *orig_i, wedge_i))
         .collect();
     let colors: Vec<RGBColor> = positive
         .iter()
@@ -777,6 +798,23 @@ mod tests {
         // plotters' Pie emits one <polygon> per slice.
         let slices = svg.matches("<polygon").count();
         assert!(slices >= 3, "pie should draw 3+ polygons, got {slices}");
+    }
+
+    #[test]
+    fn svg_pie_uses_x_labels_for_wedges() {
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let mut vals = a(vec![30.0, 20.0, 50.0]);
+        vals.x_labels = Some(vec!["Apples".into(), "Pears".into(), "Plums".into()]);
+        let svg = render_svg(&def, &vals);
+        for label in ["Apples", "Pears", "Plums"] {
+            assert!(
+                svg.contains(label),
+                "pie should label wedges with x_labels, missing {label:?}"
+            );
+        }
     }
 
     #[test]

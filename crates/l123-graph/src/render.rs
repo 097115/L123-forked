@@ -23,9 +23,15 @@ use crate::{GraphDef, GraphType};
 /// `Vec` means the range is set but yielded no numeric cells. Cells
 /// that are blank or non-numeric show up as `f64::NAN` so the positional
 /// alignment between series is preserved.
+///
+/// `x_labels` carries the *display text* of each X-range cell so
+/// renderers that label categorical positions (Pie wedges, eventually
+/// Bar/Line tick labels) can use the user's strings instead of
+/// positional indices. Parallel to `x` and only set when X is bound.
 #[derive(Clone, Debug, Default)]
 pub struct GraphValues {
     pub x: Option<Vec<f64>>,
+    pub x_labels: Option<Vec<String>>,
     pub data: [Option<Vec<f64>>; 6],
 }
 

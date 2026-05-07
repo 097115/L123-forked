@@ -2521,6 +2521,7 @@ impl App {
         let mut out = l123_graph::GraphValues::default();
         if let Some(r) = def.x {
             out.x = Some(self.read_series_values(r));
+            out.x_labels = Some(self.read_series_labels(r));
         }
         for (i, slot) in def.data.iter().enumerate() {
             if let Some(r) = *slot {
@@ -2552,6 +2553,41 @@ impl App {
                     Err(_) => f64::NAN,
                 };
                 out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Parallel to `read_series_values`, but emits the user-visible
+    /// display string per cell. Used to populate `x_labels` so wedge
+    /// / tick renderers can label categorical positions with the
+    /// 1-2-3 idiom of "X-range cell text labels each item." Empty
+    /// for blank or error cells; numbers stringified as their value.
+    fn read_series_labels(&self, r: Range) -> Vec<String> {
+        let n = r.normalized();
+        let mut out = Vec::new();
+        for col in n.start.col..=n.end.col {
+            for row in n.start.row..=n.end.row {
+                let addr = Address {
+                    sheet: n.start.sheet,
+                    col,
+                    row,
+                };
+                let s = match self.wb().engine.get_cell(addr) {
+                    Ok(cv) => match cv.value {
+                        Value::Text(s) => s,
+                        Value::Number(f) => {
+                            if f.fract() == 0.0 && f.abs() < 1e16 {
+                                format!("{}", f as i64)
+                            } else {
+                                format!("{f}")
+                            }
+                        }
+                        _ => String::new(),
+                    },
+                    Err(_) => String::new(),
+                };
+                out.push(s);
             }
         }
         out
