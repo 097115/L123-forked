@@ -366,6 +366,28 @@ where
                 .legend(move |(x, y)| {
                     Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
                 });
+            // Per-bar data labels, when bound for slot 0. Anchor at
+            // the bar's top: (segment center, v).
+            if let Some(labels) =
+                vals.data_label_text[0].as_deref()
+            {
+                let placement = def.options.data_labels_placement[0];
+                let pos = placement_pos(placement);
+                chart.draw_series(a.iter().enumerate().filter_map(|(i, &v)| {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    let text = labels.get(i)?.clone();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(Text::new(
+                        text,
+                        (SegmentValue::CenterOf(i as i32), v),
+                        ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                    ))
+                }))?;
+            }
             chart.configure_series_labels().border_style(BLACK).draw()?;
         }
         crate::Orientation::Horizontal => {
@@ -409,6 +431,28 @@ where
                 .legend(move |(x, y)| {
                     Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
                 });
+            // Per-bar data labels, when bound for slot 0. Anchor at
+            // the bar's right end: (v, segment center).
+            if let Some(labels) =
+                vals.data_label_text[0].as_deref()
+            {
+                let placement = def.options.data_labels_placement[0];
+                let pos = placement_pos(placement);
+                chart.draw_series(a.iter().enumerate().filter_map(|(i, &v)| {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    let text = labels.get(i)?.clone();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(Text::new(
+                        text,
+                        (v, SegmentValue::CenterOf(i as i32)),
+                        ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                    ))
+                }))?;
+            }
             chart.configure_series_labels().border_style(BLACK).draw()?;
         }
     }
@@ -1309,6 +1353,33 @@ mod tests {
             !svg.contains("Series A") && !svg.contains("Series B"),
             "fallback legend leaked through"
         );
+    }
+
+    #[test]
+    fn svg_bar_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [Some(vec![10.0, 20.0, 30.0]), None, None, None, None, None],
+            data_label_text: [
+                Some(vec!["Q1".into(), "Q2".into(), "Q3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["Q1", "Q2", "Q3"] {
+            assert!(
+                svg.contains(label),
+                "raster bar SVG should embed bound data labels; missing {label:?}"
+            );
+        }
     }
 
     #[test]
