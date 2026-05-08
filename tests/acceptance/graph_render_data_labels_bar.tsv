@@ -1,0 +1,76 @@
+# /Graph Options Data-Labels — render label text in the F10 bar
+# view at the chosen placement.
+#
+# Slice F (data labels render — bar) of GRAPH_PLAN.md. Mirrors the
+# line-chart slice but uses /GTB. Each bar gets its data label
+# painted at the placement offset relative to the bar's top.
+# Reference p. 2-217.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 2, 3, 4 (bar series).
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# Seed B1..B4 = Q1..Q4 (label text).
+RIGHT
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+KEYS Q4
+DOWN
+HOME
+
+# /GTB — bar graph type.
+KEY /
+KEY G
+KEY T
+KEY B
+
+# /GA over A1..A4.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GOD A over B1..B4 with placement Above.
+RIGHT
+KEY /
+KEY G
+KEY O
+KEY D
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+KEY A
+ASSERT_MODE          READY
+ASSERT_GRAPH_DATA_LABELS  A          A:B1..A:B4
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Above
+
+# F10 — labels render alongside the bar plot.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN        █
+ASSERT_SCREEN        Q1
+ASSERT_SCREEN        Q2
+ASSERT_SCREEN        Q3
+ASSERT_SCREEN        Q4
+
+ESC
+ASSERT_MODE          READY

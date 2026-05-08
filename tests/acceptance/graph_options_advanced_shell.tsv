@@ -1,0 +1,44 @@
+# /Graph Options Advanced — slice D Advanced (menu shell only).
+#
+# Per Reference p. 2-200, 0078-graph-options-advanced.html, Advanced
+# branches into Colors, Hatches, and Text. Each affects raster output
+# only and needs data-model fields not present today; this slice wires
+# the navigation shell so the menu tree is fully traversable. The
+# leaves remain NotImplemented stubs until slice F.
+
+SIZE 80 30
+
+# /GOA descends into Advanced and shows its three sub-leaves on line 2.
+KEY /
+KEY G
+KEY O
+KEY A
+ASSERT_MODE        MENU
+ASSERT_PANEL_L2    Colors
+ASSERT_PANEL_L2    Hatches
+ASSERT_PANEL_L2    Text
+ASSERT_PANEL_L2    Quit
+
+# Picking Colors stays in the menu and surfaces a NotImplemented tag
+# on line 3.
+KEY C
+ASSERT_MODE        MENU
+ASSERT_PANEL_L3    goa-colors
+
+# Esc backs up one level — still inside /Graph (panel visible).
+ESC
+ASSERT_MODE        MENU
+
+# /GOAQ pops out of Advanced back to /GO.
+KEY A
+KEY Q
+ASSERT_MODE        MENU
+ASSERT_PANEL_L2    Legend
+ASSERT_PANEL_L2    Format
+ASSERT_PANEL_L2    Advanced
+
+# Esc out of /GO, then again out of /G, lands in READY.
+ESC
+ESC
+ESC
+ASSERT_MODE        READY

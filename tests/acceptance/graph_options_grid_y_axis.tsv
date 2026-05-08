@@ -1,0 +1,44 @@
+# /Graph Options Grid Y-Axis — choose which y-axis horizontal
+# grids originate from.
+#
+# Slice F (grid y-axis sub-tree) of GRAPH_PLAN.md. Until this slice
+# the Y-Axis leaf was a NotImplemented stub. After: a submenu of
+# Y / 2Y / Both promotes the grid mask's `y_axis` field from a
+# plain bool to a tri-state (with `none` as the default — no
+# y-axis-anchored grid).
+# Reference p. 2-203, 0090-graph-options-grid.html.
+
+SIZE 80 30
+
+# Default: no y-axis grid origin set.
+ASSERT_GRAPH_GRID_Y_AXIS  none
+
+# /GOGY Y — Y-Axis origin = First.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY Y
+KEY Y
+ASSERT_MODE              READY
+ASSERT_GRAPH_GRID_Y_AXIS Y
+
+# /GOGY 2 — Y-Axis origin = Second (2Y).
+KEY /
+KEY G
+KEY O
+KEY G
+KEY Y
+KEY 2
+ASSERT_MODE              READY
+ASSERT_GRAPH_GRID_Y_AXIS 2Y
+
+# /GOGY B — Y-Axis origin = Both.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY Y
+KEY B
+ASSERT_MODE              READY
+ASSERT_GRAPH_GRID_Y_AXIS Both

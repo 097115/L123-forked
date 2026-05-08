@@ -1,0 +1,69 @@
+# /Graph F10 view — Pie renders as a horizontal proportional bar with
+# wedge labels (Pie unicode slice).
+#
+# Before this slice the F10 unicode path showed
+# "Pie graphs render in a later slice; press Esc to return."
+# placeholder for /GTP. After: each wedge appears as one segment of a
+# horizontal bar, glyph per wedge, with a labels row underneath
+# showing the X-range cell text (or positional indices when X is
+# unbound).
+# Reference p. 2-156.
+
+SIZE 80 30
+
+# Seed B1..B3 = 30, 20, 50 (numeric values), and A1..A3 = labels.
+RIGHT
+KEYS 30
+DOWN
+KEYS 20
+DOWN
+KEYS 50
+DOWN
+HOME
+KEYS Apples
+DOWN
+KEYS Pears
+DOWN
+KEYS Plums
+DOWN
+HOME
+
+# /GTP — Pie graph type.
+KEY /
+KEY G
+KEY T
+KEY P
+ASSERT_GRAPH_TYPE       PIE
+
+# /GA over B1..B3 — values.
+RIGHT
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:B1..A:B3
+HOME
+
+# /GX over A1..A3 — wedge labels.
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  X  A:A1..A:A3
+
+# F10 — graph view. The placeholder is gone, the wedge labels and
+# wedge glyphs appear.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  later slice
+ASSERT_SCREEN        Apples
+ASSERT_SCREEN        Pears
+ASSERT_SCREEN        Plums
+ASSERT_SCREEN        █
+
+ESC
+ASSERT_MODE          READY

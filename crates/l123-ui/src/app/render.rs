@@ -285,6 +285,17 @@ impl App {
         s.trim_end().to_string()
     }
 
+    /// Concatenate the symbols of one buffer column top-to-bottom.
+    /// Mirror of `line_text` for column-major content like vertical
+    /// Y-Axis titles.
+    pub fn column_text(buf: &Buffer, x: u16) -> String {
+        let mut s = String::new();
+        for y in 0..buf.area.height {
+            s.push_str(buf[(x, y)].symbol());
+        }
+        s.trim().to_string()
+    }
+
     /// Find the buffer y coordinate for a given grid row, honoring
     /// frozen rows + the current row scroll.  Returns `None` when the
     /// row is outside the visible body region.
@@ -505,6 +516,8 @@ impl App {
             self.render_graph_overlay(chunks[1], buf);
         } else if self.mode == Mode::Stat {
             self.render_stat_overlay(chunks[1], buf);
+        } else if self.is_in_graph_menu() {
+            self.render_graph_settings_overlay(chunks[1], buf);
         } else {
             self.render_grid(main_area, buf);
             if let Some(area) = icon_area {
@@ -731,6 +744,249 @@ impl App {
             }
         }
         l123_graph::render_unicode(&self.wb().current_graph, &overlay.values, area, buf);
+    }
+
+    /// True when the user has descended into the top-level `/Graph`
+    /// menu and is still navigating it. Drives the Graph Settings
+    /// overlay; cleared when the menu is dismissed (Esc / Quit) or
+    /// when a leaf action takes the app back to READY.
+    pub(super) fn is_in_graph_menu(&self) -> bool {
+        if self.mode != Mode::Menu {
+            return false;
+        }
+        let Some(state) = self.menu.as_ref() else {
+            return false;
+        };
+        state.override_root.is_none() && state.path.first() == Some(&'G')
+    }
+
+    /// `/Graph` settings sheet (R3.1 Reference p. 2-230). Four panels:
+    /// Graph Type (top-left), Data Ranges (bottom-left), Graph Type
+    /// Features (center), Options (right). Pure projection of the
+    /// current graph; menu commands mutate the graph and the next
+    /// frame redraws.
+    pub(super) fn render_graph_settings_overlay(&self, area: Rect, buf: &mut Buffer) {
+        const GREEN: Color = Color::Rgb(0, 170, 85);
+        const BRIGHT: Color = Color::Rgb(120, 255, 120);
+        const BLACK: Color = Color::Rgb(0, 0, 0);
+        let text_style = Style::default().bg(BLACK).fg(GREEN);
+        let on_style = Style::default().bg(BLACK).fg(BRIGHT);
+
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buf[(area.x + x, area.y + y)].set_style(Style::default().bg(BLACK));
+            }
+        }
+
+        let outer = Block::default()
+            .borders(Borders::ALL)
+            .border_style(text_style)
+            .title("Graph Settings")
+            .title_alignment(ratatui::layout::Alignment::Center)
+            .style(text_style);
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(22),
+                Constraint::Length(28),
+                Constraint::Min(20),
+            ])
+            .split(inner);
+
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(7), Constraint::Min(10)])
+            .split(cols[0]);
+
+        self.render_graph_panel_type(left[0], buf, text_style, on_style);
+        self.render_graph_panel_ranges(left[1], buf, text_style);
+        self.render_graph_panel_features(cols[1], buf, text_style, on_style);
+        self.render_graph_panel_options(cols[2], buf, text_style, on_style);
+    }
+
+    fn render_graph_panel_type(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        text: Style,
+        on: Style,
+    ) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(text)
+            .title("Graph Type")
+            .style(text);
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let g = &self.wb().current_graph;
+        let mark = |selected: bool, label: &str| -> Span<'static> {
+            if selected {
+                Span::styled(format!("x {label}"), on)
+            } else {
+                Span::styled(format!("  {label}"), text)
+            }
+        };
+        let t = g.graph_type;
+        use l123_graph::GraphType as GT;
+        let lines = vec![
+            Line::from(vec![
+                mark(t == GT::Line, "Line       "),
+                mark(t == GT::Pie, "Pie"),
+            ]),
+            Line::from(vec![
+                mark(t == GT::Bar, "Bar        "),
+                mark(t == GT::HLCO, "HLCO"),
+            ]),
+            Line::from(vec![
+                mark(t == GT::XY, "XY         "),
+                mark(t == GT::Mixed, "Mixed"),
+            ]),
+            Line::from(mark(t == GT::Stack, "Stacked Bar")),
+        ];
+        Paragraph::new(lines).style(text).render(inner, buf);
+    }
+
+    fn render_graph_panel_ranges(&self, area: Rect, buf: &mut Buffer, text: Style) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(text)
+            .title("Data Ranges")
+            .style(text);
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let g = &self.wb().current_graph;
+        let row = |label: &str, r: Option<l123_core::Range>| -> Line<'static> {
+            let val = match r {
+                Some(rr) => format!("{}..{}", rr.start.display_full(), rr.end.display_full()),
+                None => String::new(),
+            };
+            Line::from(format!("{label}: {val}"))
+        };
+        let lines = vec![
+            row("X", g.x),
+            row("A", g.data[0]),
+            row("B", g.data[1]),
+            row("C", g.data[2]),
+            row("D", g.data[3]),
+            row("E", g.data[4]),
+            row("F", g.data[5]),
+        ];
+        Paragraph::new(lines).style(text).render(inner, buf);
+    }
+
+    fn render_graph_panel_features(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        text: Style,
+        on: Style,
+    ) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(text)
+            .title("Graph Type Features")
+            .style(text);
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let f = &self.wb().current_graph.features;
+        let mark = |selected: bool, label: &str| -> Span<'static> {
+            if selected {
+                Span::styled(format!("x {label}"), on)
+            } else {
+                Span::styled(format!("  {label}"), text)
+            }
+        };
+        let yax = |i: usize| match f.y_axis[i] {
+            l123_graph::YAxis::First => "Y",
+            l123_graph::YAxis::Second => "2Y",
+        };
+        // Two-column layout inside the panel: a fixed-width left column
+        // for the Y/2Y per-series indicators, plus a right column for
+        // orientation and frame controls. `slot` formats the left
+        // column at a stable width so the right column lines up.
+        let slot = |letter: char, axis: &str| format!("  {letter}: {axis:<5}");
+
+        let lines = vec![
+            Line::from(vec![
+                Span::raw("Y/2Y      "),
+                mark(f.orientation == l123_graph::Orientation::Vertical, "Vertical"),
+            ]),
+            Line::from(vec![
+                Span::raw(slot('A', yax(0))),
+                mark(
+                    f.orientation == l123_graph::Orientation::Horizontal,
+                    "Horizontal",
+                ),
+            ]),
+            Line::from(slot('B', yax(1))),
+            Line::from(vec![Span::raw(slot('C', yax(2))), Span::raw("Frame")]),
+            Line::from(vec![Span::raw(slot('D', yax(3))), mark(f.frame.left, "Left")]),
+            Line::from(vec![Span::raw(slot('E', yax(4))), mark(f.frame.right, "Right")]),
+            Line::from(vec![Span::raw(slot('F', yax(5))), mark(f.frame.top, "Top")]),
+            Line::from(vec![Span::raw("          "), mark(f.frame.bottom, "Bottom")]),
+            Line::from(vec![Span::raw("          "), mark(f.frame.y_axis, "Y-axis")]),
+            Line::from(""),
+            Line::from(mark(f.stacked, "Stack data ranges")),
+            Line::from(mark(f.percent, "Percentage")),
+            Line::from(mark(f.drop_shadow, "Drop-shadow")),
+            Line::from(mark(f.three_d, "3-D")),
+            Line::from(mark(f.table, "Table")),
+        ];
+        Paragraph::new(lines).style(text).render(inner, buf);
+    }
+
+    fn render_graph_panel_options(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        text: Style,
+        on: Style,
+    ) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(text)
+            .title("Options")
+            .style(text);
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let o = &self.wb().current_graph.options;
+        let mark = |selected: bool, label: &str| -> Span<'static> {
+            if selected {
+                Span::styled(format!("x {label}"), on)
+            } else {
+                Span::styled(format!("  {label}"), text)
+            }
+        };
+
+        let lines = vec![
+            Line::from(mark(o.color, "Colors on")),
+            Line::from(""),
+            Line::from(Span::raw("Grid Lines")),
+            Line::from(mark(o.grid.horizontal, "Horizontal")),
+            Line::from(mark(o.grid.vertical, "Vertical")),
+            Line::from(mark(
+                matches!(
+                    o.grid.y_axis,
+                    Some(l123_graph::GridYAxisOrigin::First | l123_graph::GridYAxisOrigin::Both),
+                ),
+                "Y-Axis",
+            )),
+            Line::from(mark(
+                matches!(
+                    o.grid.y_axis,
+                    Some(l123_graph::GridYAxisOrigin::Second | l123_graph::GridYAxisOrigin::Both),
+                ),
+                "2Y-Axis",
+            )),
+        ];
+        Paragraph::new(lines).style(text).render(inner, buf);
     }
 
     pub(super) fn render_stat_overlay(&self, area: Rect, buf: &mut Buffer) {

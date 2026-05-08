@@ -1,0 +1,75 @@
+# /Graph F10 view — XY scatter renders dots at (X[i], A[i]) coords
+# (XY unicode slice).
+#
+# Before this slice the F10 unicode path showed
+# "XY graphs render in a later slice; press Esc to return."
+# placeholder for /GTX. After: each (X[i], A[i]) pair becomes one
+# `•` placed at the proportional position of x in [x_min..x_max]
+# and y in [y_min..y_max]. Distinct from Line in that x positions
+# come from the X range, not from a uniform sample-index grid.
+# Reference p. 2-156, 2-159 ("XY: A graphs A series against X").
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 4, 2, 5 (X coords).
+KEYS 1
+DOWN
+KEYS 4
+DOWN
+KEYS 2
+DOWN
+KEYS 5
+DOWN
+HOME
+
+# Seed B1..B4 = 10, 40, 20, 50 (Y coords).
+RIGHT
+KEYS 10
+DOWN
+KEYS 40
+DOWN
+KEYS 20
+DOWN
+KEYS 50
+DOWN
+HOME
+
+# /GTX — XY graph type.
+KEY /
+KEY G
+KEY T
+KEY X
+ASSERT_GRAPH_TYPE       XY
+
+# /GX over A1..A4 — independent axis values.
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  X  A:A1..A:A4
+
+# /GA over B1..B4 — dependent series. Re-home + RIGHT so the POINT
+# anchor lands at B1, not at the prior /GX endpoint.
+HOME
+RIGHT
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:B1..A:B4
+HOME
+
+# F10 — graph view. Placeholder gone, scatter dots present.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  later slice
+ASSERT_SCREEN        •
+
+ESC
+ASSERT_MODE          READY

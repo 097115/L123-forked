@@ -92,13 +92,26 @@ where
         return Ok(());
     }
     match def.graph_type {
-        GraphType::Line => draw_line(vals, root),
-        GraphType::Bar => draw_bar(vals, root),
-        GraphType::XY => draw_xy(vals, root),
-        GraphType::Stack => draw_stack(vals, root),
-        GraphType::Pie => draw_pie(vals, root),
-        GraphType::HLCO => draw_hlco(vals, root),
-        GraphType::Mixed => draw_mixed(vals, root),
+        GraphType::Line => draw_line(def, vals, root),
+        GraphType::Bar => draw_bar(def, vals, root),
+        GraphType::XY => draw_xy(def, vals, root),
+        GraphType::Stack => draw_stack(def, vals, root),
+        GraphType::Pie => draw_pie(def, vals, root),
+        GraphType::HLCO => draw_hlco(def, vals, root),
+        GraphType::Mixed => draw_mixed(def, vals, root),
+    }
+}
+
+/// Top caption for the chart, derived from First / Second titles.
+/// Pie charts don't carry x/y descriptions, but they do carry
+/// captions; everything else uses both.
+fn caption_string(def: &GraphDef) -> Option<String> {
+    let t = &def.options.titles;
+    match (t.first.as_deref(), t.second.as_deref()) {
+        (Some(a), Some(b)) => Some(format!("{a} — {b}")),
+        (Some(a), None) => Some(a.to_owned()),
+        (None, Some(b)) => Some(b.to_owned()),
+        (None, None) => None,
     }
 }
 
@@ -160,7 +173,11 @@ fn collected_data(vals: &GraphValues) -> Vec<&[f64]> {
     vals.data.iter().filter_map(|o| o.as_deref()).collect()
 }
 
-fn draw_line<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_line<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -171,41 +188,124 @@ where
         return paint_error(root, "No A..F data.");
     }
     let (y_lo, y_hi) = axis_bounds(&series);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
-    for (i, s) in series.iter().enumerate() {
-        let color = SERIES_PALETTE[i % SERIES_PALETTE.len()];
-        let points: Vec<(f64, f64)> = s
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
+    // Pair each populated series with its A..F slot so data labels
+    // and the legend text both look up by slot, not by populated
+    // position.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
+    for (palette_i, (slot, s)) in series_with_slot.iter().enumerate() {
+        let color = SERIES_PALETTE[palette_i % SERIES_PALETTE.len()];
+        let points: Vec<(usize, f64, f64)> = s
             .iter()
             .enumerate()
             .filter_map(|(idx, &v)| {
                 if v.is_finite() {
-                    Some((idx as f64, v))
+                    Some((idx, idx as f64, v))
                 } else {
                     None
                 }
             })
             .collect();
+        let xy_points: Vec<(f64, f64)> =
+            points.iter().map(|(_, x, y)| (*x, *y)).collect();
+        let label = def
+            .options
+            .legend
+            .get(*slot)
+            .and_then(|opt| opt.clone())
+            .unwrap_or_else(|| format!("Series {}", (b'A' + *slot as u8) as char));
         chart
-            .draw_series(LineSeries::new(points.clone(), color.stroke_width(2)))?
-            .label(format!("Series {}", (b'A' + i as u8) as char))
+            .draw_series(LineSeries::new(xy_points.clone(), color.stroke_width(2)))?
+            .label(label)
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         // Visible markers at each point.
         chart.draw_series(
-            points
-                .into_iter()
-                .map(|(x, y)| Circle::new((x, y), 3, color.filled())),
+            xy_points
+                .iter()
+                .map(|(x, y)| Circle::new((*x, *y), 3, color.filled())),
         )?;
+        // Per-point data labels, when bound for this slot. Anchor
+        // each label at the data point and let `placement_pos`
+        // translate the placement enum into a TextStyle alignment
+        // so the label sits above / below / to the side of the dot.
+        if let Some(labels) = vals.data_label_text.get(*slot).and_then(|o| o.as_deref()) {
+            let placement = def.options.data_labels_placement[*slot];
+            let pos = placement_pos(placement);
+            chart.draw_series(points.iter().filter_map(|(orig_i, x, y)| {
+                labels
+                    .get(*orig_i)
+                    .filter(|s| !s.is_empty())
+                    .map(|text| {
+                        Text::new(
+                            text.clone(),
+                            (*x, *y),
+                            ("sans-serif", 14)
+                                .into_font()
+                                .color(&BLACK)
+                                .pos(pos),
+                        )
+                    })
+            }))?;
+        }
     }
     chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
-fn draw_bar<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+/// Translate a [`DataLabelPlacement`] into a plotters `Pos` so the
+/// `Text` element anchored at a data point lands at the right
+/// offset relative to the point. plotters positions text by where
+/// its bounding box's anchor point falls, so e.g. `(Center, Bottom)`
+/// puts the bottom-centre of the label at the data coord — making
+/// the label float **above** the dot.
+fn placement_pos(p: crate::DataLabelPlacement) -> plotters::style::text_anchor::Pos {
+    use plotters::style::text_anchor::{HPos, Pos, VPos};
+    use crate::DataLabelPlacement::*;
+    match p {
+        Above => Pos::new(HPos::Center, VPos::Bottom),
+        Below => Pos::new(HPos::Center, VPos::Top),
+        Left => Pos::new(HPos::Right, VPos::Center),
+        Right => Pos::new(HPos::Left, VPos::Center),
+        Center => Pos::new(HPos::Center, VPos::Center),
+    }
+}
+
+fn draw_bar<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -216,28 +316,154 @@ where
     };
     let (y_lo, y_hi) = axis_bounds(&[a]);
     let y_lo = y_lo.min(0.0);
-    let mut chart = ChartBuilder::on(root)
+    let bar_color = SERIES_PALETTE[0];
+    let label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "Series A".into());
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
-    chart.draw_series(
-        Histogram::vertical(&chart)
-            .style(BLUE.filled())
-            .margin(6)
-            .data(a.iter().enumerate().filter_map(|(i, &v)| {
-                if v.is_finite() {
-                    Some((i as i32, v))
-                } else {
-                    None
-                }
-            })),
-    )?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    match def.features.orientation {
+        crate::Orientation::Vertical => {
+            let mut chart = builder
+                .build_cartesian_2d((0..a.len() as i32).into_segmented(), y_lo..y_hi)?;
+            let mut mesh = chart.configure_mesh();
+            if !def.options.grid.vertical {
+                mesh.disable_x_mesh();
+            }
+            if !def.options.grid.horizontal {
+                mesh.disable_y_mesh();
+            }
+            if let Some(t) = def.options.titles.x_axis.as_deref() {
+                mesh.x_desc(t);
+            }
+            if let Some(t) = def.options.titles.y_axis.as_deref() {
+                mesh.y_desc(t);
+            }
+            mesh.draw()?;
+            chart
+                .draw_series(
+                    Histogram::vertical(&chart)
+                        .style(bar_color.filled())
+                        .margin(6)
+                        .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                            if v.is_finite() {
+                                Some((i as i32, v))
+                            } else {
+                                None
+                            }
+                        })),
+                )?
+                .label(label)
+                .legend(move |(x, y)| {
+                    Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+                });
+            // Per-bar data labels, when bound for slot 0. Anchor at
+            // the bar's top: (segment center, v).
+            if let Some(labels) =
+                vals.data_label_text[0].as_deref()
+            {
+                let placement = def.options.data_labels_placement[0];
+                let pos = placement_pos(placement);
+                chart.draw_series(a.iter().enumerate().filter_map(|(i, &v)| {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    let text = labels.get(i)?.clone();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(Text::new(
+                        text,
+                        (SegmentValue::CenterOf(i as i32), v),
+                        ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                    ))
+                }))?;
+            }
+            chart.configure_series_labels().border_style(BLACK).draw()?;
+        }
+        crate::Orientation::Horizontal => {
+            // Horizontal bars: value axis becomes the X axis, the
+            // segmented category axis becomes Y. Histogram::horizontal
+            // emits one rectangle per (value, segment) pair, growing
+            // rightward from the y-axis baseline. Grid axes swap
+            // meaning along with the orientation.
+            let mut chart = builder
+                .build_cartesian_2d(y_lo..y_hi, (0..a.len() as i32).into_segmented())?;
+            let mut mesh = chart.configure_mesh();
+            // Vertical grid lines (in 1-2-3 terms) → x-axis grid in
+            // plotters terms when the value axis is X.
+            if !def.options.grid.vertical {
+                mesh.disable_x_mesh();
+            }
+            if !def.options.grid.horizontal {
+                mesh.disable_y_mesh();
+            }
+            if let Some(t) = def.options.titles.x_axis.as_deref() {
+                mesh.x_desc(t);
+            }
+            if let Some(t) = def.options.titles.y_axis.as_deref() {
+                mesh.y_desc(t);
+            }
+            mesh.draw()?;
+            chart
+                .draw_series(
+                    Histogram::horizontal(&chart)
+                        .style(bar_color.filled())
+                        .margin(6)
+                        .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                            if v.is_finite() {
+                                Some((i as i32, v))
+                            } else {
+                                None
+                            }
+                        })),
+                )?
+                .label(label)
+                .legend(move |(x, y)| {
+                    Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+                });
+            // Per-bar data labels, when bound for slot 0. Anchor at
+            // the bar's right end: (v, segment center).
+            if let Some(labels) =
+                vals.data_label_text[0].as_deref()
+            {
+                let placement = def.options.data_labels_placement[0];
+                let pos = placement_pos(placement);
+                chart.draw_series(a.iter().enumerate().filter_map(|(i, &v)| {
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    let text = labels.get(i)?.clone();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(Text::new(
+                        text,
+                        (v, SegmentValue::CenterOf(i as i32)),
+                        ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                    ))
+                }))?;
+            }
+            chart.configure_series_labels().border_style(BLACK).draw()?;
+        }
+    }
     Ok(())
 }
 
-fn draw_xy<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_xy<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -252,31 +478,84 @@ where
     };
     let (x_lo, x_hi) = axis_bounds(&[x]);
     let (y_lo, y_hi) = axis_bounds(&[y]);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart = builder.build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
     let n = x.len().min(y.len());
-    let points: Vec<(f64, f64)> = (0..n)
+    // Keep the original index so `data_label_text[0][orig_i]` lines
+    // up after the non-finite filter.
+    let points: Vec<(usize, f64, f64)> = (0..n)
         .filter_map(|i| {
             if x[i].is_finite() && y[i].is_finite() {
-                Some((x[i], y[i]))
+                Some((i, x[i], y[i]))
             } else {
                 None
             }
         })
         .collect();
-    chart.draw_series(
-        points
-            .iter()
-            .map(|&(px, py)| Circle::new((px, py), 4, BLUE.filled())),
-    )?;
+    let color = SERIES_PALETTE[0];
+    let label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "Series A".into());
+    chart
+        .draw_series(
+            points
+                .iter()
+                .map(|(_, px, py)| Circle::new((*px, *py), 4, color.filled())),
+        )?
+        .label(label)
+        .legend(move |(x, y)| Circle::new((x + 6, y), 4, color.filled()));
+    // Per-point data labels, when bound for slot 0.
+    if let Some(labels) = vals.data_label_text[0].as_deref() {
+        let placement = def.options.data_labels_placement[0];
+        let pos = placement_pos(placement);
+        chart.draw_series(points.iter().filter_map(|(orig_i, px, py)| {
+            let text = labels.get(*orig_i)?.clone();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Text::new(
+                text,
+                (*px, *py),
+                ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+            ))
+        }))?;
+    }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
-fn draw_stack<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_stack<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -304,16 +583,45 @@ where
     if y_max == 0.0 {
         y_max = 1.0;
     }
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
-    chart.configure_mesh().draw()?;
-    // Draw each layer as its own Histogram on top of the cumulative sums.
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
+    let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
+    // Draw each layer as its own Histogram on top of the cumulative
+    // sums. Pair every populated series with its original A..F slot
+    // so the legend text and the stacking colour stay aligned.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
     let mut base: Vec<f64> = vec![0.0; n];
-    for (si, s) in series.iter().enumerate() {
-        let color = SERIES_PALETTE[si % SERIES_PALETTE.len()];
+    for (layer_i, (slot, s)) in series_with_slot.iter().enumerate() {
+        let color = SERIES_PALETTE[layer_i % SERIES_PALETTE.len()];
         let points: Vec<(i32, f64)> = (0..n as i32)
             .filter_map(|i| {
                 let idx = i as usize;
@@ -326,17 +634,65 @@ where
                 Some((i, top))
             })
             .collect();
-        chart.draw_series(
-            Histogram::vertical(&chart)
-                .style(color.filled())
-                .margin(6)
-                .data(points),
-        )?;
+        let label = def
+            .options
+            .legend
+            .get(*slot)
+            .and_then(|opt| opt.clone())
+            .unwrap_or_else(|| format!("Series {}", (b'A' + *slot as u8) as char));
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(color.filled())
+                    .margin(6)
+                    .data(points.clone()),
+            )?
+            .label(label)
+            .legend(move |(x, y)| {
+                Rectangle::new([(x, y - 5), (x + 12, y + 5)], color.filled())
+            });
+        // Per-segment data labels, anchored at the segment's top
+        // (the running cumulative total after this layer).
+        if let Some(labels) = vals.data_label_text[*slot].as_deref() {
+            let placement = def.options.data_labels_placement[*slot];
+            let pos = placement_pos(placement);
+            chart.draw_series(points.iter().filter_map(|(i, top)| {
+                let text = labels.get(*i as usize)?.clone();
+                if text.is_empty() {
+                    return None;
+                }
+                Some(Text::new(
+                    text,
+                    (SegmentValue::CenterOf(*i), *top),
+                    ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                ))
+            }))?;
+        }
     }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
-fn draw_pie<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+/// Wedge label for a pie slice. Prefers the cell-text string at
+/// `orig_i` in `x_labels` when set and non-empty; otherwise falls
+/// back to a 1-based positional index using the surviving wedge's
+/// position so the labels stay sequential ("1", "2", "3").
+fn wedge_label(x_labels: Option<&[String]>, orig_i: usize, wedge_i: usize) -> String {
+    if let Some(labels) = x_labels {
+        if let Some(s) = labels.get(orig_i) {
+            if !s.trim().is_empty() {
+                return s.clone();
+            }
+        }
+    }
+    format!("{}", wedge_i + 1)
+}
+
+fn draw_pie<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -345,22 +701,37 @@ where
         Some(a) if !a.is_empty() => a,
         _ => return paint_error(root, "Set /Graph A to plot a pie."),
     };
-    let positive: Vec<f64> = a
+    // Walk the A series alongside its index so each surviving wedge
+    // can pull its label from the parallel x_labels slot. Filter must
+    // happen after pairing so x_labels stays aligned even when some
+    // A values are non-positive and get dropped.
+    let pairs: Vec<(usize, f64)> = a
         .iter()
         .copied()
-        .filter(|v| v.is_finite() && *v > 0.0)
+        .enumerate()
+        .filter(|(_, v)| v.is_finite() && *v > 0.0)
         .collect();
-    if positive.is_empty() {
+    if pairs.is_empty() {
         return paint_error(root, "Pie needs positive values.");
     }
+    // Pie charts have no Cartesian axes, so x_desc/y_desc don't apply;
+    // the caption is drawn directly via root.draw_text instead.
     let (w, h) = root.dim_in_pixel();
+    if let Some(caption) = caption_string(def) {
+        root.draw_text(
+            &caption,
+            &TextStyle::from(("sans-serif", 24).into_font()).color(&BLACK),
+            (10, 10),
+        )?;
+    }
     let cx = (w / 2) as i32;
     let cy = (h / 2) as i32;
     let radius = (w.min(h) as f64 * 0.4).max(20.0);
-    let labels: Vec<String> = positive
+    let positive: Vec<f64> = pairs.iter().map(|(_, v)| *v).collect();
+    let labels: Vec<String> = pairs
         .iter()
         .enumerate()
-        .map(|(i, _)| format!("{}", i + 1))
+        .map(|(wedge_i, (orig_i, _))| wedge_label(vals.x_labels.as_deref(), *orig_i, wedge_i))
         .collect();
     let colors: Vec<RGBColor> = positive
         .iter()
@@ -375,7 +746,11 @@ where
     Ok(())
 }
 
-fn draw_hlco<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_hlco<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -411,12 +786,38 @@ where
         y_hi = y_lo + 1.0;
     }
 
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart = builder.build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
+    // Aggregate per-x line segments into three single-series
+    // pipelines so each contributes one legend entry. Legend names
+    // come from the matching A/B/C/D slot with sensible fallbacks.
+    let mut bar_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
+    let mut close_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
+    let mut open_segs: Vec<PathElement<(f64, f64)>> = Vec::new();
     for (i, &h) in high.iter().enumerate().take(n) {
         let l = low.get(i).copied().unwrap_or(f64::NAN);
         let c = close.get(i).copied().unwrap_or(f64::NAN);
@@ -425,28 +826,88 @@ where
             continue;
         }
         let x = i as f64;
-        // Main vertical line from L to H.
-        chart.draw_series(std::iter::once(PathElement::new(
+        bar_segs.push(PathElement::new(
             vec![(x, l), (x, h)],
             BLACK.stroke_width(1),
-        )))?;
+        ));
         if c.is_finite() {
-            chart.draw_series(std::iter::once(PathElement::new(
+            close_segs.push(PathElement::new(
                 vec![(x, c), (x + 0.3, c)],
                 GREEN.stroke_width(2),
-            )))?;
+            ));
         }
         if o.is_finite() {
-            chart.draw_series(std::iter::once(PathElement::new(
+            open_segs.push(PathElement::new(
                 vec![(x - 0.3, o), (x, o)],
                 RED.stroke_width(2),
-            )))?;
+            ));
         }
     }
+    let high_label = def
+        .options
+        .legend
+        .first()
+        .and_then(|o| o.clone())
+        .unwrap_or_else(|| "High-Low".into());
+    chart
+        .draw_series(bar_segs)?
+        .label(high_label)
+        .legend(|(x, y)| PathElement::new(vec![(x + 6, y - 5), (x + 6, y + 5)], BLACK.stroke_width(2)));
+    if !close_segs.is_empty() {
+        let close_label = def
+            .options
+            .legend
+            .get(2)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Close".into());
+        chart
+            .draw_series(close_segs)?
+            .label(close_label)
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 12, y)], GREEN.stroke_width(2)));
+    }
+    if !open_segs.is_empty() {
+        let open_label = def
+            .options
+            .legend
+            .get(3)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Open".into());
+        chart
+            .draw_series(open_segs)?
+            .label(open_label)
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 12, y)], RED.stroke_width(2)));
+    }
+    // Per-bar data labels, anchored at the bar's high point. Slot 0
+    // (the High series) is HLCO's primary anchor for labels — same
+    // convention as the unicode F10 view.
+    if let Some(labels) = vals.data_label_text[0].as_deref() {
+        let placement = def.options.data_labels_placement[0];
+        let pos = placement_pos(placement);
+        chart.draw_series(high.iter().enumerate().take(n).filter_map(|(i, &h)| {
+            let l = low.get(i).copied().unwrap_or(f64::NAN);
+            if !h.is_finite() || !l.is_finite() {
+                return None;
+            }
+            let text = labels.get(i)?.clone();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Text::new(
+                text,
+                (i as f64, h.max(l)),
+                ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+            ))
+        }))?;
+    }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
-fn draw_mixed<DB>(vals: &GraphValues, root: &DrawingArea<DB, plotters::coord::Shift>) -> DrawResult
+fn draw_mixed<DB>(
+    def: &GraphDef,
+    vals: &GraphValues,
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+) -> DrawResult
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -459,31 +920,82 @@ where
     let n = a.len().max(b.len());
     let (y_lo, y_hi) = axis_bounds(&[a, b]);
     let y_lo = y_lo.min(0.0);
-    let mut chart = ChartBuilder::on(root)
+    let mut builder = ChartBuilder::on(root);
+    builder
         .margin(20)
         .x_label_area_size(30)
-        .y_label_area_size(40)
-        .build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
-    chart.configure_mesh().draw()?;
+        .y_label_area_size(40);
+    if let Some(c) = caption_string(def) {
+        builder.caption(c, ("sans-serif", 24));
+    }
+    let mut chart =
+        builder.build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
+    let mut mesh = chart.configure_mesh();
+    // Grid is off-by-default in 1-2-3 (Reference p. 2-200). plotters
+    // draws a full mesh by default, so we explicitly disable each
+    // direction whose flag the user hasn't set.
+    if !def.options.grid.vertical {
+        mesh.disable_x_mesh();
+    }
+    if !def.options.grid.horizontal {
+        mesh.disable_y_mesh();
+    }
+    if let Some(t) = def.options.titles.x_axis.as_deref() {
+        mesh.x_desc(t);
+    }
+    if let Some(t) = def.options.titles.y_axis.as_deref() {
+        mesh.y_desc(t);
+    }
+    mesh.draw()?;
+    let bar_color = SERIES_PALETTE[0];
+    let line_color = SERIES_PALETTE[1];
     if !a.is_empty() {
-        chart.draw_series(
-            Histogram::vertical(&chart)
-                .style(BLUE.filled())
-                .margin(6)
-                .data(a.iter().enumerate().filter_map(|(i, &v)| {
-                    if v.is_finite() {
-                        Some((i as i32, v))
-                    } else {
-                        None
-                    }
-                })),
-        )?;
+        let bar_label = def
+            .options
+            .legend
+            .first()
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Series A".into());
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(bar_color.filled())
+                    .margin(6)
+                    .data(a.iter().enumerate().filter_map(|(i, &v)| {
+                        if v.is_finite() {
+                            Some((i as i32, v))
+                        } else {
+                            None
+                        }
+                    })),
+            )?
+            .label(bar_label)
+            .legend(move |(x, y)| {
+                Rectangle::new([(x, y - 5), (x + 12, y + 5)], bar_color.filled())
+            });
     }
     // Line overlay on series B.
     if !b.is_empty() {
-        // Histogram uses SegmentValue<i32>; a LineSeries over the same
-        // axis type needs the same coordinate shape, so we build a
-        // second chart in Cartesian 2D aligned to the first.
+        // Register the line legend on the bar chart via a phantom
+        // empty histogram so both rows render in the same legend
+        // box. The visual line itself draws on a second chart with
+        // Cartesian f64 coords, since Histogram uses SegmentValue.
+        let line_label = def
+            .options
+            .legend
+            .get(1)
+            .and_then(|o| o.clone())
+            .unwrap_or_else(|| "Series B".into());
+        chart
+            .draw_series(
+                Histogram::vertical(&chart)
+                    .style(line_color.filled())
+                    .data(std::iter::empty::<(i32, f64)>()),
+            )?
+            .label(line_label)
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 12, y)], line_color.stroke_width(2))
+            });
         let mut over = ChartBuilder::on(root)
             .margin(20)
             .x_label_area_size(30)
@@ -501,12 +1013,13 @@ where
                 }
             })
             .collect();
-        over.draw_series(LineSeries::new(pts.clone(), RED.stroke_width(2)))?;
+        over.draw_series(LineSeries::new(pts.clone(), line_color.stroke_width(2)))?;
         over.draw_series(
             pts.into_iter()
-                .map(|(x, y)| Circle::new((x, y), 3, RED.filled())),
+                .map(|(x, y)| Circle::new((x, y), 3, line_color.filled())),
         )?;
     }
+    chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
 
@@ -600,6 +1113,23 @@ mod tests {
     }
 
     #[test]
+    fn svg_pie_uses_x_labels_for_wedges() {
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let mut vals = a(vec![30.0, 20.0, 50.0]);
+        vals.x_labels = Some(vec!["Apples".into(), "Pears".into(), "Plums".into()]);
+        let svg = render_svg(&def, &vals);
+        for label in ["Apples", "Pears", "Plums"] {
+            assert!(
+                svg.contains(label),
+                "pie should label wedges with x_labels, missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
     fn svg_hlco_draws_vertical_bars() {
         let vals = make_vals(&[
             (0, vec![10.0, 11.0, 12.0]), // high
@@ -614,7 +1144,7 @@ mod tests {
         let svg = render_svg(&def, &vals);
         assert!(svg.contains("<svg"));
         assert!(
-            svg.contains("<path") || svg.contains("<line"),
+            svg.contains("<path") || svg.contains("<line") || svg.contains("<polyline"),
             "no strokes in HLCO"
         );
     }
@@ -694,5 +1224,495 @@ mod tests {
             let png = render_png(&def, &vals);
             assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{t:?} bad PNG magic");
         }
+    }
+
+    #[test]
+    fn svg_caption_combines_first_and_second_titles() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    first: Some("Sales 1991".into()),
+                    second: Some("by Quarter".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        assert!(svg.contains("Sales 1991"), "missing first title in SVG");
+        assert!(svg.contains("by Quarter"), "missing second title in SVG");
+    }
+
+    #[test]
+    fn svg_uses_x_axis_and_y_axis_descriptions() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    x_axis: Some("Quarter".into()),
+                    y_axis: Some("Dollars".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0, 4.0]));
+        assert!(svg.contains("Quarter"), "missing x-axis description in SVG");
+        assert!(svg.contains("Dollars"), "missing y-axis description in SVG");
+    }
+
+    #[test]
+    fn svg_default_has_no_mesh_grid_in_plot_area() {
+        // plotters draws a mesh by default; we suppress it when the
+        // user has not set options.grid. The SVG still contains axis
+        // ticks (short tick marks), but full-length grid lines should
+        // be absent. We approximate by counting <line> path elements:
+        // a no-grid SVG has the axis frame, axis ticks, and a
+        // vertical/horizontal axis line, but no row of horizontal
+        // mesh lines spanning the plot.
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        let no_grid_lines = svg.match_indices("<line").count();
+        let with_grid = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                grid: crate::GridMask {
+                    horizontal: true,
+                    vertical: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg2 = render_svg(&with_grid, &a(vec![1.0, 2.0, 3.0]));
+        let with_grid_lines = svg2.match_indices("<line").count();
+        assert!(
+            with_grid_lines > no_grid_lines,
+            "enabling grid should add SVG <line> elements (no_grid={no_grid_lines}, with_grid={with_grid_lines})"
+        );
+    }
+
+    #[test]
+    fn svg_mixed_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Mixed,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("ABars".into()),
+                    Some("BLine".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![3.0, 2.0, 1.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("ABars"), "Mixed SVG missing A-bars legend");
+        assert!(svg.contains("BLine"), "Mixed SVG missing B-line legend");
+    }
+
+    #[test]
+    fn svg_hlco_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::HLCO,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![10.0, 11.0, 12.0]),
+                Some(vec![8.0, 9.0, 10.0]),
+                Some(vec![9.0, 10.5, 11.0]),
+                Some(vec![8.5, 10.0, 10.5]),
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["D1".into(), "D2".into(), "D3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["D1", "D2", "D3"] {
+            assert!(
+                svg.contains(label),
+                "raster HLCO SVG should embed bound data labels; missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_hlco_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::HLCO,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("HighA".into()),
+                    None,
+                    Some("CloseC".into()),
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![10.0, 11.0, 12.0]),
+            (1, vec![8.0, 9.0, 10.0]),
+            (2, vec![9.0, 10.5, 11.0]),
+            (3, vec![8.5, 10.0, 10.5]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("HighA"), "HLCO SVG missing High legend");
+        assert!(svg.contains("CloseC"), "HLCO SVG missing Close legend");
+    }
+
+    #[test]
+    fn svg_xy_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::XY,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            x: Some(vec![1.0, 2.0, 3.0]),
+            data: [
+                Some(vec![10.0, 20.0, 30.0]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["P1".into(), "P2".into(), "P3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["P1", "P2", "P3"] {
+            assert!(
+                svg.contains(label),
+                "raster XY SVG should embed bound data labels; missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_xy_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::XY,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Sample".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (6, vec![1.0, 2.0, 3.0]), // X
+            (0, vec![10.0, 20.0, 30.0]), // A
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("Sample"), "XY SVG missing user legend text");
+        assert!(
+            !svg.contains("Series A"),
+            "fallback legend leaked through"
+        );
+    }
+
+    #[test]
+    fn svg_stack_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Stack,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![1.0, 2.0, 3.0]),
+                Some(vec![1.0, 1.0, 1.0]),
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["A1".into(), "A2".into(), "A3".into()]),
+                Some(vec!["B1".into(), "B2".into(), "B3".into()]),
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["A1", "A2", "A3", "B1", "B2", "B3"] {
+            assert!(
+                svg.contains(label),
+                "raster stack SVG should embed bound data labels; missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_stack_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Stack,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("A1".into()),
+                    Some("B1".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![1.0, 1.0, 1.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("A1"), "stack SVG missing A1 legend");
+        assert!(svg.contains("B1"), "stack SVG missing B1 legend");
+        assert!(
+            !svg.contains("Series A") && !svg.contains("Series B"),
+            "fallback legend leaked through"
+        );
+    }
+
+    #[test]
+    fn svg_bar_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [Some(vec![10.0, 20.0, 30.0]), None, None, None, None, None],
+            data_label_text: [
+                Some(vec!["Q1".into(), "Q2".into(), "Q3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["Q1", "Q2", "Q3"] {
+            assert!(
+                svg.contains(label),
+                "raster bar SVG should embed bound data labels; missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_bar_horizontal_differs_from_vertical() {
+        // Same data, two orientations. The SVGs should render
+        // distinct geometry: vertical bars extend up from the
+        // x-axis, horizontal bars extend right from the y-axis.
+        let vals = a(vec![1.0, 2.0, 3.0]);
+        let v_def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        let h_def = GraphDef {
+            graph_type: GraphType::Bar,
+            features: crate::GraphFeatures {
+                orientation: crate::Orientation::Horizontal,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let v_svg = render_svg(&v_def, &vals);
+        let h_svg = render_svg(&h_def, &vals);
+
+        // Pull every bar-coloured rect (#0000FF fill from
+        // SERIES_PALETTE[0]) and find the LARGEST one in each SVG.
+        // Plotters emits the rect attrs as `x=".." y=".." width="N"
+        // height="N"`. The largest such rect is the tallest bar in
+        // vertical orientation, or the widest bar in horizontal —
+        // its aspect ratio reveals which axis is the value axis.
+        fn largest_bar_dims(svg: &str) -> Option<(u32, u32)> {
+            let mut best: Option<(u32, u32, u32)> = None;
+            for piece in svg.split("<rect ").skip(1) {
+                if !piece.contains("fill=\"#0000FF\"") {
+                    continue;
+                }
+                let pull = |name: &str| -> Option<u32> {
+                    let needle = format!(" {name}=\"");
+                    let i = piece.find(&needle)? + needle.len();
+                    let rest = &piece[i..];
+                    let end = rest.find('"')?;
+                    rest[..end].parse().ok()
+                };
+                let w = pull("width")?;
+                let h = pull("height")?;
+                let area = w * h;
+                if best.is_none_or(|(_, _, a)| area > a) {
+                    best = Some((w, h, area));
+                }
+            }
+            best.map(|(w, h, _)| (w, h))
+        }
+
+        let (v_w, v_h) =
+            largest_bar_dims(&v_svg).expect("vertical SVG missing #0000FF bar rect");
+        let (h_w, h_h) =
+            largest_bar_dims(&h_svg).expect("horizontal SVG missing #0000FF bar rect");
+        assert!(
+            v_h > v_w * 2,
+            "vertical bar should be much taller than wide; got {v_w}x{v_h}"
+        );
+        assert!(
+            h_w > h_h * 2,
+            "horizontal bar should be much wider than tall; got {h_w}x{h_h}"
+        );
+    }
+
+    #[test]
+    fn svg_bar_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Q1 Sales".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![10.0, 20.0, 30.0]));
+        assert!(
+            svg.contains("Q1 Sales"),
+            "bar SVG should embed the user-set legend text"
+        );
+    }
+
+    #[test]
+    fn svg_line_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![10.0, 20.0, 30.0]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["Q1".into(), "Q2".into(), "Q3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["Q1", "Q2", "Q3"] {
+            assert!(
+                svg.contains(label),
+                "raster line SVG should embed bound data labels; missing {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn svg_line_uses_user_legend_text_when_set() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            options: crate::GraphOptions {
+                legend: [
+                    Some("Net Sales".into()),
+                    Some("YTD".into()),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let vals = make_vals(&[
+            (0, vec![1.0, 2.0, 3.0]),
+            (1, vec![4.0, 5.0, 6.0]),
+        ]);
+        let svg = render_svg(&def, &vals);
+        assert!(svg.contains("Net Sales"), "missing A legend in SVG");
+        assert!(svg.contains("YTD"), "missing B legend in SVG");
+        assert!(
+            !svg.contains("Series A") && !svg.contains("Series B"),
+            "fallback legend leaked through"
+        );
+    }
+
+    #[test]
+    fn svg_pie_caption_drawn_directly_when_titles_set() {
+        // Pie chart has no Cartesian mesh; the caption is painted by
+        // root.draw_text rather than ChartBuilder.caption.
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            options: crate::GraphOptions {
+                titles: crate::Titles {
+                    first: Some("Cost Breakdown".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![1.0, 2.0, 3.0]));
+        assert!(
+            svg.contains("Cost Breakdown"),
+            "pie caption missing in SVG"
+        );
     }
 }

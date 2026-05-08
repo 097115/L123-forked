@@ -1,0 +1,49 @@
+# /Graph Options Scale {Y|X|2Y} Indicator {Yes|No|Manual} — store
+# whether the per-axis magnitude indicator (e.g. "× 1000") shows.
+#
+# Slice F (scale indicator) of GRAPH_PLAN.md. Until this slice the
+# Indicator leaf was a NotImplemented stub. After: a Yes / No /
+# Manual submenu records `ScaleAxis::indicator` per axis. Default
+# Yes — the renderer picks an appropriate magnitude tag when the
+# data range warrants one.
+# Reference p. 2-204, 0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html.
+
+SIZE 80 30
+
+# Defaults: every axis indicator = Yes.
+ASSERT_GRAPH_SCALE_INDICATOR  Y   Yes
+ASSERT_GRAPH_SCALE_INDICATOR  X   Yes
+ASSERT_GRAPH_SCALE_INDICATOR  2Y  Yes
+
+# /GOSY I N — Y-Scale Indicator No.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY I
+KEY N
+ASSERT_MODE                   READY
+ASSERT_GRAPH_SCALE_INDICATOR  Y   No
+
+# /GOSX I M — X-Scale Indicator Manual.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY I
+KEY M
+ASSERT_GRAPH_SCALE_INDICATOR  X   Manual
+
+# /GOS2 I Y — 2Y-Scale Indicator Yes (already default; explicit set).
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY I
+KEY Y
+ASSERT_GRAPH_SCALE_INDICATOR  2Y  Yes
+ASSERT_GRAPH_SCALE_INDICATOR  Y   No
+ASSERT_GRAPH_SCALE_INDICATOR  X   Manual

@@ -8,7 +8,7 @@ pub mod identity;
 pub mod sysinfo;
 pub mod theme;
 
-pub use app::App;
+pub use app::{App, GraphTitleSlot};
 pub use config::Config;
 pub use identity::Identity;
 pub use theme::Theme;

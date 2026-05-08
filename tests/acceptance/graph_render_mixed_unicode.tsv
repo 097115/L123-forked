@@ -1,0 +1,76 @@
+# /Graph F10 view — Mixed renders A as bars with B as a line
+# overlay (Mixed unicode slice).
+#
+# Before this slice the F10 unicode path showed
+# "Mixed graphs render in a later slice; press Esc to return."
+# placeholder for /GTM. After: A series renders as bars (█) and B
+# series renders as a dot-line (•) on the same plot area, matching
+# the raster `draw_mixed` convention.
+# Reference p. 2-156.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 2, 3, 4 (bar series).
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# Seed B1..B4 = 4, 3, 2, 1 (line series — opposite slope so visually
+# distinguishable from the bars).
+RIGHT
+KEYS 4
+DOWN
+KEYS 3
+DOWN
+KEYS 2
+DOWN
+KEYS 1
+DOWN
+HOME
+
+# /GTM — Mixed graph type.
+KEY /
+KEY G
+KEY T
+KEY M
+ASSERT_GRAPH_TYPE       MIXED
+
+# /GA over A1..A4 — bar series.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A4
+
+# /GB over B1..B4 — line series.
+HOME
+RIGHT
+KEY /
+KEY G
+KEY B
+DOWN
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  B  A:B1..A:B4
+HOME
+
+# F10 — graph view. Placeholder gone; both bar and line glyphs
+# present.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  later slice
+ASSERT_SCREEN        █
+ASSERT_SCREEN        •
+
+ESC
+ASSERT_MODE          READY

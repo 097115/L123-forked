@@ -1,0 +1,117 @@
+# /Graph F10 view — HLCO renders High-Low vertical bars with Open
+# (left tick) and Close (right tick) marks (HLCO unicode slice).
+#
+# Before this slice the F10 unicode path showed
+# "HLCO graphs render in a later slice; press Esc to return."
+# placeholder for /GTH. After: each x position renders a vertical
+# `│` line from B[i] (low) to A[i] (high), with `─` ticks pointing
+# left for D[i] (open) and right for C[i] (close). Series mapping
+# matches the raster `draw_hlco` convention and Reference p. 2-156.
+#
+# Series convention: A=High, B=Low, C=Close, D=Open.
+
+SIZE 80 30
+
+# Seed:
+#   A1..A3 = 10, 12, 14   (High)
+#   B1..B3 =  4,  6,  5   (Low)
+#   C1..C3 =  8, 11, 12   (Close → right tick)
+#   D1..D3 =  6,  7,  9   (Open  → left tick)
+KEYS 10
+DOWN
+KEYS 12
+DOWN
+KEYS 14
+DOWN
+HOME
+RIGHT
+KEYS 4
+DOWN
+KEYS 6
+DOWN
+KEYS 5
+DOWN
+HOME
+RIGHT
+RIGHT
+KEYS 8
+DOWN
+KEYS 11
+DOWN
+KEYS 12
+DOWN
+HOME
+RIGHT
+RIGHT
+RIGHT
+KEYS 6
+DOWN
+KEYS 7
+DOWN
+KEYS 9
+DOWN
+HOME
+
+# /GTH — HLCO graph type.
+KEY /
+KEY G
+KEY T
+KEY H
+ASSERT_GRAPH_TYPE       HLCO
+
+# /GA over A1..A3 — High.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A3
+
+# /GB over B1..B3 — Low.
+HOME
+RIGHT
+KEY /
+KEY G
+KEY B
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  B  A:B1..A:B3
+
+# /GC over C1..C3 — Close.
+HOME
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY C
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  C  A:C1..A:C3
+
+# /GD over D1..D3 — Open.
+HOME
+RIGHT
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY D
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  D  A:D1..A:D3
+HOME
+
+# F10 — graph view. Placeholder gone; column 1 (the first HLCO bar
+# anchor) holds vertical-line glyphs from the data, distinct from
+# the frame's left edge at column 0.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  later slice
+ASSERT_SCREEN_COL    1       │
+
+ESC
+ASSERT_MODE          READY

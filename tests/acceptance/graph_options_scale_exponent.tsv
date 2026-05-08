@@ -1,0 +1,72 @@
+# /Graph Options Scale {Y|X|2Y} Exponent — store the order-of-
+# magnitude shift for the per-axis tick labels.
+#
+# Slice F (scale exponent) of GRAPH_PLAN.md. Until this slice the
+# Exponent leaf was a NotImplemented stub. After: a signed numeric
+# prompt (clamped to a sensible -19..=19 in 1-2-3 R3.4a's
+# documented range) records `ScaleAxis::exponent` per axis.
+# Default 0 means "auto" — renderer picks the magnitude.
+# Reference p. 2-204, 0095-graph-options-scale-y-scale-x-scale-2y-scale-exponent.html.
+
+SIZE 80 30
+
+# Defaults: every axis exponent = 0.
+ASSERT_GRAPH_SCALE_EXPONENT  Y   0
+ASSERT_GRAPH_SCALE_EXPONENT  X   0
+ASSERT_GRAPH_SCALE_EXPONENT  2Y  0
+
+# /GOSY E 3 — Y-Scale Exponent = 3.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY E
+KEYS 3
+ENTER
+ASSERT_MODE                  READY
+ASSERT_GRAPH_SCALE_EXPONENT  Y   3
+
+# /GOSX E -2 — X-Scale Exponent = -2 (signed).
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY E
+KEYS -2
+ENTER
+ASSERT_GRAPH_SCALE_EXPONENT  X   -2
+
+# /GOS2 E 6 — 2Y-Scale Exponent = 6.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY E
+KEYS 6
+ENTER
+ASSERT_GRAPH_SCALE_EXPONENT  2Y  6
+
+# Out-of-range positive clamps to 19.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY E
+KEYS 99
+ENTER
+ASSERT_GRAPH_SCALE_EXPONENT  Y   19
+
+# Out-of-range negative clamps to -19.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY E
+KEYS -99
+ENTER
+ASSERT_GRAPH_SCALE_EXPONENT  X   -19

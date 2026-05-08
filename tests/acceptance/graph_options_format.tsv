@@ -1,0 +1,72 @@
+# /Graph Options Format — slice D3 (Format portion) of GRAPH_PLAN.md.
+#
+# Per Reference p. 2-200 (0089-graph-options-format.html):
+#   /GOF {Graph|A-F}  → entry-point: all six series, or one of A..F
+#       {Lines|Symbols|Both|Neither|Area|Quit}
+#   Default is Both for every series.
+
+SIZE 80 30
+
+# Default: every series formatted Both.
+ASSERT_GRAPH_FORMAT  A  BOTH
+ASSERT_GRAPH_FORMAT  B  BOTH
+ASSERT_GRAPH_FORMAT  F  BOTH
+
+# /GOFAS — series A → Symbols; B-F unchanged.
+KEY /
+KEY G
+KEY O
+KEY F
+KEY A
+KEY S
+ASSERT_MODE          READY
+ASSERT_GRAPH_FORMAT  A  SYMBOLS
+ASSERT_GRAPH_FORMAT  B  BOTH
+
+# /GOFFL — series F → Lines.
+KEY /
+KEY G
+KEY O
+KEY F
+KEY F
+KEY L
+ASSERT_MODE          READY
+ASSERT_GRAPH_FORMAT  F  LINES
+
+# /GOFGN — every series → Neither.
+KEY /
+KEY G
+KEY O
+KEY F
+KEY G
+KEY N
+ASSERT_MODE          READY
+ASSERT_GRAPH_FORMAT  A  NEITHER
+ASSERT_GRAPH_FORMAT  B  NEITHER
+ASSERT_GRAPH_FORMAT  C  NEITHER
+ASSERT_GRAPH_FORMAT  D  NEITHER
+ASSERT_GRAPH_FORMAT  E  NEITHER
+ASSERT_GRAPH_FORMAT  F  NEITHER
+
+# /GOFGA — every series → Area.
+KEY /
+KEY G
+KEY O
+KEY F
+KEY G
+KEY A
+ASSERT_MODE          READY
+ASSERT_GRAPH_FORMAT  A  AREA
+ASSERT_GRAPH_FORMAT  F  AREA
+
+# /GOFCB — series C → Both (back to default).
+KEY /
+KEY G
+KEY O
+KEY F
+KEY C
+KEY B
+ASSERT_GRAPH_FORMAT  C  BOTH
+ASSERT_GRAPH_FORMAT  A  AREA
+
+ASSERT_MODE          READY

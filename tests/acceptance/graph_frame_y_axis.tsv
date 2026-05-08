@@ -1,0 +1,65 @@
+# /Graph Type Features Frame Y-Axis — toggle the inner y-axis line.
+#
+# Slice F (frame y-axis) of GRAPH_PLAN.md. Until this slice the
+# Y-Axis leaf was a NotImplemented stub; the panel had no row for
+# it and `FrameMask` had no field. After: a real toggle that draws
+# a `│` line just inside the Left frame edge (between the outer
+# frame and the data plot), at column 1 when frame.left is also on.
+# Reference p. 2-198, 0065-graph-type-features-continued.html.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1..4 so a Bar chart has shape and the data fills
+# the inner area.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# /GTB then /GA over A1..A4.
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GTFF Y-Axis Yes — Type Features → Frame → Y-Axis → Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY Y
+KEY Y
+ASSERT_MODE          READY
+
+# F10 — graph view. Column 0 holds the frame's outer left edge
+# (`│`); column 1 — which would otherwise have been data — now
+# holds the inner Y-axis line.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN_COL    0       │
+ASSERT_SCREEN_COL    1       │
+ESC
+
+# /GTFF Y-Axis No — turn it back off.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY Y
+KEY N
+ASSERT_MODE          READY

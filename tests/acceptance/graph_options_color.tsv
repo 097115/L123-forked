@@ -1,0 +1,44 @@
+# /Graph Options Color | B&W — slice D1 of GRAPH_PLAN.md.
+#
+# Color → options.color = true   (default; panel shows "x Colors on")
+# B&W   → options.color = false  (panel shows "  Colors on")
+#
+# Reference: R3.1 Reference p. 2-200, 0087-graph-options-color-and-graph-options-b-w.html.
+
+SIZE 80 30
+
+# Default state shows Colors on.
+KEY /
+KEY G
+ASSERT_SCREEN  x Colors on
+ESC
+ESC
+ASSERT_MODE    READY
+
+# /GOB — switch to B&W.
+KEY /
+KEY G
+KEY O
+KEY B
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN_NOT_CONTAINS  x Colors on
+# The label still shows; only the leading "x " is gone.
+ASSERT_SCREEN  Colors on
+ESC
+ESC
+
+# /GOC — switch back to Color.
+KEY /
+KEY G
+KEY O
+KEY C
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  x Colors on
+ESC
+ESC
+
+ASSERT_MODE    READY

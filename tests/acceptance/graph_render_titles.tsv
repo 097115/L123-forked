@@ -1,0 +1,77 @@
+# /Graph F10 view — Titles render above and below the plot.
+#
+# Slice F1 of GRAPH_PLAN.md. The F10 unicode renderer reserves rows
+# for First (top), Second (subtitle), and X-Axis (bottom) titles
+# from current_graph.options.titles. Y-Axis / 2Y-Axis / Note /
+# Other-Note are deferred (would need vertical text or extra layout
+# decisions).
+
+SIZE 80 30
+
+# Seed A1..A5 = 1..5 so a Bar chart actually has shape.
+KEYS 1
+ENTER
+KEYS 2
+ENTER
+KEYS 3
+ENTER
+KEYS 4
+ENTER
+KEYS 5
+ENTER
+HOME
+
+# /GTB then /GA over A1..A5.
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A5
+
+# Set First, Second, X-Axis titles.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY F
+KEYS Sales 1991
+ENTER
+ASSERT_GRAPH_TITLE   First   Sales 1991
+
+KEY /
+KEY G
+KEY O
+KEY T
+KEY S
+KEYS by Quarter
+ENTER
+ASSERT_GRAPH_TITLE   Second  by Quarter
+
+KEY /
+KEY G
+KEY O
+KEY T
+KEY X
+KEYS Quarter
+ENTER
+ASSERT_GRAPH_TITLE   X       Quarter
+
+# F10 — graph view, with title text on screen.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN        Sales 1991
+ASSERT_SCREEN        by Quarter
+ASSERT_SCREEN        Quarter
+# Bar plot still renders.
+ASSERT_SCREEN        █
+
+ESC
+ASSERT_MODE          READY

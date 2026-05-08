@@ -1,0 +1,60 @@
+# /Graph Name Table — write a directory of every named graph to a
+# worksheet range.
+#
+# Slice F (graph name table) of GRAPH_PLAN.md. Until this slice the
+# Table leaf was a NotImplemented stub. After: a POINT prompt for
+# the destination anchor cell; on commit the named-graphs map is
+# walked alphabetically and each entry writes one row of two
+# columns — name in column 0, graph-type tag in column 1.
+# Reference p. 2-218 → 2-224.
+
+SIZE 80 30
+
+# Create a Bar graph, save it as "first".
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY N
+KEY C
+KEYS first
+ENTER
+ASSERT_GRAPH_NAMES_COUNT  1
+
+# Create an XY graph, save it as "second".
+KEY /
+KEY G
+KEY T
+KEY X
+KEY /
+KEY G
+KEY N
+KEY C
+KEYS second
+ENTER
+ASSERT_GRAPH_NAMES_COUNT  2
+
+# Move pointer to D5 — fresh anchor for the table output.
+RIGHT
+RIGHT
+RIGHT
+DOWN
+DOWN
+DOWN
+DOWN
+
+# /GNT — Name Table. POINT prompt opens; Enter at D5 anchor.
+KEY /
+KEY G
+KEY N
+KEY T
+ENTER
+ASSERT_MODE               READY
+
+# Names in column D, types in column E, one row per entry, sorted.
+ASSERT_CELL  A:D5  first
+ASSERT_CELL  A:E5  BAR
+ASSERT_CELL  A:D6  second
+ASSERT_CELL  A:E6  XY

@@ -1,0 +1,69 @@
+# /Graph F10 view — Percent normalization on stacked bars.
+#
+# Slice F6b of GRAPH_PLAN.md. When features.percent = true (also
+# called "100%"), every stacked column normalizes to plot_height
+# regardless of its absolute total. Useful for showing
+# part-to-whole composition independent of column magnitude.
+# Reference p. 2-194: "100% — Plot values as percentages of their
+# total."
+
+SIZE 80 30
+
+# Seed A1=1 A2=1; B1=1 B2=2.
+KEYS 1
+DOWN
+KEYS 1
+DOWN
+HOME
+RIGHT
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+HOME
+ASSERT_POINTER     A:A1
+
+# /GTB
+KEY /
+KEY G
+KEY T
+KEY B
+# /GA → A1..A2
+KEY /
+KEY G
+KEY A
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A2
+HOME
+RIGHT
+# /GB → B1..B2
+KEY /
+KEY G
+KEY B
+DOWN
+ENTER
+
+# Stacked Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY S
+KEY Y
+
+# Percent Yes — both columns now normalize to 100% even though
+# their totals differ (2 vs 3).
+KEY /
+KEY G
+KEY T
+KEY F
+KEY 1
+KEY Y
+
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+ASSERT_SCREEN     ▓
+ESC
+ASSERT_MODE       READY

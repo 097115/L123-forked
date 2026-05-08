@@ -56,7 +56,8 @@ pub use types::{
 };
 use types::{
     ColorTarget, CustomMenuState, DataParseState, DataQueryState, DataRegressionState,
-    DataSortState, Entry, EntryKind, EraseConfirmState, FormatField, FormatSnapshot, GraphOverlay,
+    DataSortState, Entry, EntryKind, EraseConfirmState, FormatField, FormatSnapshot, GraphFrameSide,
+    GraphOverlay, GraphScaleAxis,
     IconPanelGeom, JournalEntry, LabelDirection, MacroState, MenuState, PendingAsyncOp,
     PendingCommand, PointState, PrintDestination, PrintSession, PromptNext, PromptState, QueuedOp,
     SaveConfirmState, SearchScope, SearchSession, SortDir, SortKeySlot, StatView, Workbook,
@@ -65,6 +66,7 @@ use types::{
 pub(crate) use types::{
     CombineKind, FileListKind, FileListState, NameListOrigin, NameListState, TitlesKind, XtractKind,
 };
+pub use types::GraphTitleSlot;
 
 // Grid geometry — kept as consts so both render and cell-address-probe agree.
 const ROW_GUTTER: u16 = 5;
@@ -214,6 +216,17 @@ pub struct App {
     /// typed name is stashed here after the prompt step and consumed by
     /// commit_point.
     pending_name: Option<String>,
+    /// Transient slot for `/Graph Group`: the POINT step commits the
+    /// range here, then the rooted Columnwise/Rowwise submenu reads
+    /// it and walks the range. Cleared once consumed (or when the
+    /// orient submenu is dismissed).
+    pending_graph_group_range: Option<l123_core::Range>,
+    /// `/Graph Options Data-Labels {A-F}` slot stashed between the
+    /// POINT range commit and the placement submenu's commit. The
+    /// rooted Center/Left/Above/Right/Below leaves read this to know
+    /// which slot's `data_labels_placement` to write. Cleared once
+    /// consumed.
+    pending_data_labels_slot: Option<usize>,
     /// After committing a filename that already exists on disk, this
     /// carries the chosen path through the Cancel/Replace/Backup
     /// submenu. Mode stays MENU while present.
@@ -831,6 +844,21 @@ fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
 /// Replace whole-word occurrences of `name` (case-insensitive,
 /// already lowercase) in `expr` with `replacement`. Mirrors the
 /// matching rules of `formula_uses_name`.
+/// Stable ASCII-uppercase tag for a graph type. Matches the token
+/// returned by `App::graph_type_str` so on-screen state, transcript
+/// directives, and the `/Graph Name Table` output all agree.
+fn graph_type_tag(t: l123_graph::GraphType) -> &'static str {
+    match t {
+        l123_graph::GraphType::Line => "LINE",
+        l123_graph::GraphType::Bar => "BAR",
+        l123_graph::GraphType::XY => "XY",
+        l123_graph::GraphType::Stack => "STACK",
+        l123_graph::GraphType::Pie => "PIE",
+        l123_graph::GraphType::HLCO => "HLCO",
+        l123_graph::GraphType::Mixed => "MIXED",
+    }
+}
+
 fn replace_name_in_formula(expr: &str, name: &str, replacement: &str) -> String {
     if name.is_empty() {
         return expr.to_string();
@@ -1127,6 +1155,8 @@ impl App {
             prompt: None,
             error_message: None,
             pending_name: None,
+            pending_graph_group_range: None,
+            pending_data_labels_slot: None,
             save_confirm: None,
             erase_confirm: None,
             pending_xtract_path: None,
@@ -1352,15 +1382,7 @@ impl App {
     /// Current graph's type as an ASCII all-caps token, for use in
     /// `ASSERT_GRAPH_TYPE` transcript directives.
     pub fn graph_type_str(&self) -> &'static str {
-        match self.wb().current_graph.graph_type {
-            GraphType::Line => "LINE",
-            GraphType::Bar => "BAR",
-            GraphType::XY => "XY",
-            GraphType::Stack => "STACK",
-            GraphType::Pie => "PIE",
-            GraphType::HLCO => "HLCO",
-            GraphType::Mixed => "MIXED",
-        }
+        graph_type_tag(self.wb().current_graph.graph_type)
     }
 
     /// Current graph's range for a given series slot, formatted like
@@ -1380,6 +1402,52 @@ impl App {
         match self.wb().current_graph.get(s) {
             None => String::new(),
             Some(r) => format!("{}..{}", r.start.display_full(), r.end.display_full()),
+        }
+    }
+
+    /// Compact encoding of the current graph's per-series
+    /// `/Graph Options Format`. `slot` is `A`..`F`. Returns one of
+    /// `LINES`, `SYMBOLS`, `BOTH`, `NEITHER`, `AREA`. Empty string for
+    /// any non-A..F letter so the caller's parser can reject cleanly.
+    pub fn graph_format_str(&self, slot: char) -> &'static str {
+        let i = match slot.to_ascii_uppercase() {
+            'A' => 0,
+            'B' => 1,
+            'C' => 2,
+            'D' => 3,
+            'E' => 4,
+            'F' => 5,
+            _ => return "",
+        };
+        match self.wb().current_graph.options.format[i] {
+            l123_graph::LineFormat::Lines => "LINES",
+            l123_graph::LineFormat::Symbols => "SYMBOLS",
+            l123_graph::LineFormat::Both => "BOTH",
+            l123_graph::LineFormat::Neither => "NEITHER",
+            l123_graph::LineFormat::Area => "AREA",
+        }
+    }
+
+    /// Compact encoding of the current graph's `/Graph Options Grid`
+    /// state, for acceptance assertions. Returns the lowercase letters
+    /// of the active flags in order `h`, `v`, `y`; the literal `none`
+    /// when every flag is off.
+    pub fn graph_grid_str(&self) -> String {
+        let g = &self.wb().current_graph.options.grid;
+        let mut out = String::new();
+        if g.horizontal {
+            out.push('h');
+        }
+        if g.vertical {
+            out.push('v');
+        }
+        if g.y_axis.is_some() {
+            out.push('y');
+        }
+        if out.is_empty() {
+            "none".into()
+        } else {
+            out
         }
     }
 
@@ -2034,8 +2102,517 @@ impl App {
         self.close_menu();
     }
 
+    fn set_graph_y_axis(&mut self, slot: usize, axis: l123_graph::YAxis) {
+        self.wb_mut().current_graph.features.y_axis[slot] = axis;
+        self.close_menu();
+    }
+
+    fn set_graph_y_axis_all(&mut self, axis: l123_graph::YAxis) {
+        for slot in &mut self.wb_mut().current_graph.features.y_axis {
+            *slot = axis;
+        }
+        self.close_menu();
+    }
+
+    fn set_graph_frame_side(&mut self, side: GraphFrameSide, on: bool) {
+        let f = &mut self.wb_mut().current_graph.features.frame;
+        match side {
+            GraphFrameSide::Left => f.left = on,
+            GraphFrameSide::Right => f.right = on,
+            GraphFrameSide::Top => f.top = on,
+            GraphFrameSide::Bottom => f.bottom = on,
+            GraphFrameSide::YAxis => f.y_axis = on,
+        }
+        self.close_menu();
+    }
+
+    /// `/Graph Options Format`. `slot = None` is the "Graph" leaf —
+    /// applies the format to every A..F series at once. `Some(i)` is
+    /// just series `i`. Closes the menu in either case.
+    fn set_graph_format(&mut self, slot: Option<usize>, fmt: l123_graph::LineFormat) {
+        let g = &mut self.wb_mut().current_graph;
+        match slot {
+            None => {
+                for f in &mut g.options.format {
+                    *f = fmt;
+                }
+            }
+            Some(i) => g.options.format[i] = fmt,
+        }
+        self.close_menu();
+    }
+
+    /// `/Graph Options Titles {slot}` — open a single-line text prompt
+    /// pre-filled with the slot's current value (or empty when unset).
+    /// `commit_prompt` writes the trimmed buffer back into the slot or
+    /// clears it if the user erased everything before pressing Enter.
+    fn start_graph_title_prompt(&mut self, slot: GraphTitleSlot) {
+        let label = match slot {
+            GraphTitleSlot::First => "Enter first graph title:",
+            GraphTitleSlot::Second => "Enter second graph title:",
+            GraphTitleSlot::XAxis => "Enter x-axis title:",
+            GraphTitleSlot::YAxis => "Enter y-axis title:",
+            GraphTitleSlot::TwoYAxis => "Enter 2y-axis title:",
+            GraphTitleSlot::Note => "Enter note:",
+            GraphTitleSlot::OtherNote => "Enter other note:",
+        };
+        let initial = self
+            .graph_title_str(slot)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: label.into(),
+            buffer: initial,
+            next: PromptNext::GraphOptionsTitle { slot },
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Graph Group {Columnwise|Rowwise}` — split the stashed group
+    /// range and assign X plus A..F. Per Reference p. 2-172, the
+    /// first column (or row) becomes X; succeeding ones become A, B,
+    /// C, D, E, F. Up to 7 strips are used. Slots beyond what the
+    /// range provides stay cleared. Overrides any prior /Graph X or
+    /// Consumes the slot stashed during the data-labels POINT step
+    /// and writes the chosen placement, then pops back to READY.
+    /// No-op when the stash is empty (defensive — should not happen
+    /// in practice since the placement submenu is only rooted from
+    /// the commit path that sets the stash).
+    fn apply_data_labels_placement(&mut self, placement: l123_graph::DataLabelPlacement) {
+        let Some(slot) = self.pending_data_labels_slot.take() else {
+            self.close_menu();
+            return;
+        };
+        if let Some(s) = self
+            .wb_mut()
+            .current_graph
+            .options
+            .data_labels_placement
+            .get_mut(slot)
+        {
+            *s = placement;
+        }
+        self.close_menu();
+    }
+
+    /// A-F assignments.
+    fn apply_graph_group(&mut self, orient: GraphGroupOrientation) {
+        let Some(range) = self.pending_graph_group_range.take() else {
+            self.close_menu();
+            return;
+        };
+        let g = &mut self.wb_mut().current_graph;
+        g.x = None;
+        g.data = Default::default();
+
+        let (start, end) = (range.start, range.end);
+        let (lo_col, hi_col) = (start.col.min(end.col), start.col.max(end.col));
+        let (lo_row, hi_row) = (start.row.min(end.row), start.row.max(end.row));
+        let sheet = start.sheet;
+        let slots = [
+            l123_graph::Series::X,
+            l123_graph::Series::A,
+            l123_graph::Series::B,
+            l123_graph::Series::C,
+            l123_graph::Series::D,
+            l123_graph::Series::E,
+            l123_graph::Series::F,
+        ];
+
+        match orient {
+            GraphGroupOrientation::Columnwise => {
+                let n = (hi_col - lo_col + 1).min(7);
+                for (i, slot) in slots.iter().take(n as usize).enumerate() {
+                    let col = lo_col + i as u16;
+                    let strip = l123_core::Range {
+                        start: l123_core::Address {
+                            sheet,
+                            col,
+                            row: lo_row,
+                        },
+                        end: l123_core::Address {
+                            sheet,
+                            col,
+                            row: hi_row,
+                        },
+                    };
+                    g.set(*slot, strip);
+                }
+            }
+            GraphGroupOrientation::Rowwise => {
+                let n = ((hi_row - lo_row + 1).min(7)) as usize;
+                for (i, slot) in slots.iter().take(n).enumerate() {
+                    let row = lo_row + i as u32;
+                    let strip = l123_core::Range {
+                        start: l123_core::Address {
+                            sheet,
+                            col: lo_col,
+                            row,
+                        },
+                        end: l123_core::Address {
+                            sheet,
+                            col: hi_col,
+                            row,
+                        },
+                    };
+                    g.set(*slot, strip);
+                }
+            }
+        }
+        self.close_menu();
+    }
+
+    /// `/Graph Name {Use|Create|Delete}` — open a single-line text
+    /// prompt. The verb is just for the prompt label; the
+    /// `PromptNext` distinguishes the commit handler.
+    fn start_graph_name_prompt(&mut self, next: PromptNext, verb: &str) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("{verb} graph name:"),
+            buffer: String::new(),
+            next,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// Number of named graphs stored on the current workbook.
+    /// Test-surface accessor.
+    pub fn graph_names_count(&self) -> usize {
+        self.wb().graphs.len()
+    }
+
+    /// `/Graph Options Scale {axis} {Auto|Manual}` — set scale mode
+    /// for one axis. Closes the menu.
+    fn set_graph_scale_mode(&mut self, axis: GraphScaleAxis, mode: l123_graph::ScaleMode) {
+        let opts = &mut self.wb_mut().current_graph.options;
+        let target = match axis {
+            GraphScaleAxis::Y => &mut opts.scale_y,
+            GraphScaleAxis::X => &mut opts.scale_x,
+            GraphScaleAxis::TwoY => &mut opts.scale_2y,
+        };
+        target.mode = mode;
+        self.close_menu();
+    }
+
+    /// Shared back end for the six per-axis Scale Type leaves. Sets
+    /// `ScaleAxis::type_` on the chosen axis and pops back to READY.
+    fn set_graph_scale_type(
+        &mut self,
+        axis: GraphScaleAxis,
+        type_: l123_graph::ScaleType,
+    ) {
+        let opts = &mut self.wb_mut().current_graph.options;
+        let target = match axis {
+            GraphScaleAxis::Y => &mut opts.scale_y,
+            GraphScaleAxis::X => &mut opts.scale_x,
+            GraphScaleAxis::TwoY => &mut opts.scale_2y,
+        };
+        target.type_ = type_;
+        self.close_menu();
+    }
+
+    /// Shared back end for the nine per-axis Scale Indicator leaves
+    /// (axis × {Yes, No, Manual}). Sets `ScaleAxis::indicator` on
+    /// the chosen axis and pops back to READY.
+    fn set_graph_scale_indicator(
+        &mut self,
+        axis: GraphScaleAxis,
+        indicator: l123_graph::ScaleIndicator,
+    ) {
+        let opts = &mut self.wb_mut().current_graph.options;
+        let target = match axis {
+            GraphScaleAxis::Y => &mut opts.scale_y,
+            GraphScaleAxis::X => &mut opts.scale_x,
+            GraphScaleAxis::TwoY => &mut opts.scale_2y,
+        };
+        target.indicator = indicator;
+        self.close_menu();
+    }
+
+    /// `/Graph Options Scale Skip` — numeric prompt seeded with the
+    /// current skip count. `fresh: true` means the first keystroke
+    /// clears the buffer (1-2-3 muscle-memory pattern).
+    fn start_graph_skip_prompt(&mut self) {
+        let current = self.wb().current_graph.options.skip;
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter x-axis label skip factor (1..8192):".into(),
+            buffer: current.to_string(),
+            next: PromptNext::GraphOptionsScaleSkip,
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_graph_scale_exponent_prompt(&mut self, axis: GraphScaleAxis) {
+        let opts = &self.wb().current_graph.options;
+        let current = match axis {
+            GraphScaleAxis::Y => opts.scale_y.exponent,
+            GraphScaleAxis::X => opts.scale_x.exponent,
+            GraphScaleAxis::TwoY => opts.scale_2y.exponent,
+        };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale exponent (-19..19):"),
+            buffer: current.to_string(),
+            next: PromptNext::GraphOptionsScaleAxisExponent { axis },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_graph_scale_width_prompt(&mut self, axis: GraphScaleAxis) {
+        let opts = &self.wb().current_graph.options;
+        let current = match axis {
+            GraphScaleAxis::Y => opts.scale_y.width,
+            GraphScaleAxis::X => opts.scale_x.width,
+            GraphScaleAxis::TwoY => opts.scale_2y.width,
+        };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale label width (0..40):"),
+            buffer: current.to_string(),
+            next: PromptNext::GraphOptionsScaleAxisWidth { axis },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_graph_scale_bound_prompt(&mut self, axis: GraphScaleAxis, upper: bool) {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            GraphScaleAxis::Y => &opts.scale_y,
+            GraphScaleAxis::X => &opts.scale_x,
+            GraphScaleAxis::TwoY => &opts.scale_2y,
+        };
+        let current = if upper { s.upper } else { s.lower };
+        let kind = if upper { "upper" } else { "lower" };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale {kind} limit (blank to clear):"),
+            buffer: current.map(|v| v.to_string()).unwrap_or_default(),
+            next: PromptNext::GraphOptionsScaleBound { axis, upper },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// Read accessors for tests.
+    pub fn graph_scale_mode_str(&self, axis: char) -> &'static str {
+        let opts = &self.wb().current_graph.options;
+        let m = match axis {
+            'Y' | 'y' => opts.scale_y.mode,
+            'X' | 'x' => opts.scale_x.mode,
+            '2' => opts.scale_2y.mode,
+            _ => return "",
+        };
+        match m {
+            l123_graph::ScaleMode::Automatic => "AUTO",
+            l123_graph::ScaleMode::Manual => "MANUAL",
+        }
+    }
+    pub fn graph_scale_skip(&self) -> u32 {
+        self.wb().current_graph.options.skip
+    }
+    /// Read accessor for `/Graph Options Scale {axis} Indicator` —
+    /// returns the `ScaleIndicator::tag` string ("Yes" / "No" /
+    /// "Manual"). `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_indicator_str(&self, axis: char) -> &'static str {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return "",
+        };
+        s.indicator.tag()
+    }
+
+    /// Read accessor for `/Graph Options Scale {axis} Exponent`.
+    /// 0 means auto. Range is -19..=19 per the 1-2-3 R3.4a docs.
+    /// `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_exponent(&self, axis: char) -> i8 {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return 0,
+        };
+        s.exponent
+    }
+
+    /// Read accessor for `/Graph Options Scale {axis} Width`. 0
+    /// means auto. `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_width(&self, axis: char) -> u8 {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return 0,
+        };
+        s.width
+    }
+
+    /// Read accessor for `/Graph Options Scale {axis} Type` —
+    /// returns the `ScaleType::tag` string ("Linear" / "Logarithmic").
+    /// `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_type_str(&self, axis: char) -> &'static str {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return "",
+        };
+        s.type_.tag()
+    }
+
+    /// Read accessor for `/Graph Options Scale {axis} {Lower|Upper}`.
+    /// `axis` is 'Y', 'X', or '2'; `upper` selects which bound. Returns
+    /// `None` when the bound is unset.
+    pub fn graph_scale_bound(&self, axis: char, upper: bool) -> Option<f64> {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return None,
+        };
+        if upper { s.upper } else { s.lower }
+    }
+
+    /// `/Graph Options Legend {A..F}` — open a single-line text prompt
+    /// pre-filled with the slot's current legend.
+    fn start_graph_legend_prompt(&mut self, slot: usize) {
+        let label = format!("Enter legend for {}:", (b'A' + slot as u8) as char);
+        let initial = self
+            .graph_legend_str(slot)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label,
+            buffer: initial,
+            next: PromptNext::GraphOptionsLegend { slot },
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// Read accessor for `current_graph.options.data_labels[slot]` as
+    /// the formatted range string `A:A1..A:A5`. Empty string when the
+    /// slot is unset.
+    pub fn graph_data_labels_str(&self, slot: usize) -> String {
+        let r = self
+            .wb()
+            .current_graph
+            .options
+            .data_labels
+            .get(slot)
+            .copied()
+            .flatten();
+        match r {
+            None => String::new(),
+            Some(rr) => format!("{}..{}", rr.start.display_full(), rr.end.display_full()),
+        }
+    }
+
+    /// Shared back end for the three `/Graph Options Grid Y-Axis`
+    /// leaves. `None` clears the origin (no Y-axis-anchored grid).
+    fn set_graph_grid_y_axis(&mut self, origin: Option<l123_graph::GridYAxisOrigin>) {
+        self.wb_mut().current_graph.options.grid.y_axis = origin;
+        self.close_menu();
+    }
+
+    /// Read accessor for `current_graph.options.grid.y_axis` as the
+    /// `GridYAxisOrigin::tag` string ("Y", "2Y", "Both") or "none"
+    /// when unset.
+    pub fn graph_grid_y_axis_str(&self) -> &'static str {
+        match self.wb().current_graph.options.grid.y_axis {
+            None => "none",
+            Some(o) => o.tag(),
+        }
+    }
+
+    /// Read accessor for `current_graph.options.data_labels_placement[slot]`.
+    /// Returns the `DataLabelPlacement::tag` string ("Center", "Above", …).
+    /// Out-of-range slot indices return the default placement's tag.
+    pub fn graph_data_labels_placement_str(&self, slot: usize) -> &'static str {
+        self.wb()
+            .current_graph
+            .options
+            .data_labels_placement
+            .get(slot)
+            .copied()
+            .unwrap_or_default()
+            .tag()
+    }
+
+    /// Read accessor for `current_graph.options.legend[slot]`. `slot` is
+    /// the 0..=5 index (A=0 .. F=5); out-of-range returns `None`.
+    pub fn graph_legend_str(&self, slot: usize) -> Option<&str> {
+        self.wb()
+            .current_graph
+            .options
+            .legend
+            .get(slot)?
+            .as_deref()
+    }
+
+    /// Read accessor used by the prompt's pre-fill and by tests via
+    /// `ASSERT_GRAPH_TITLE`. `None` means the slot is unset.
+    pub fn graph_title_str(&self, slot: GraphTitleSlot) -> Option<&str> {
+        let t = &self.wb().current_graph.options.titles;
+        let opt = match slot {
+            GraphTitleSlot::First => &t.first,
+            GraphTitleSlot::Second => &t.second,
+            GraphTitleSlot::XAxis => &t.x_axis,
+            GraphTitleSlot::YAxis => &t.y_axis,
+            GraphTitleSlot::TwoYAxis => &t.two_y_axis,
+            GraphTitleSlot::Note => &t.note,
+            GraphTitleSlot::OtherNote => &t.other_note,
+        };
+        opt.as_deref()
+    }
+
+    fn set_graph_frame_all(&mut self, on: bool) {
+        let f = &mut self.wb_mut().current_graph.features.frame;
+        f.left = on;
+        f.right = on;
+        f.top = on;
+        f.bottom = on;
+        self.close_menu();
+    }
+
     /// F10 / `/Graph View`. Snapshot the current graph's series values
     /// and transition to [`Mode::Graph`]. An empty graph shows a "define
+    /// Shared back end for `/Graph Reset {X | A | B | C | D | E | F}`.
+    /// Clears the named slot and returns to READY.
+    fn execute_graph_clear_series(&mut self, s: Series) {
+        self.wb_mut().current_graph.clear(s);
+        self.close_menu();
+    }
+
     /// ranges first" placeholder rather than silently no-op'ing so the
     /// user sees something happened.
     fn enter_graph_view(&mut self) {
@@ -2190,10 +2767,16 @@ impl App {
         let mut out = l123_graph::GraphValues::default();
         if let Some(r) = def.x {
             out.x = Some(self.read_series_values(r));
+            out.x_labels = Some(self.read_series_labels(r));
         }
         for (i, slot) in def.data.iter().enumerate() {
             if let Some(r) = *slot {
                 out.data[i] = Some(self.read_series_values(r));
+            }
+        }
+        for (i, slot) in def.options.data_labels.iter().enumerate() {
+            if let Some(r) = *slot {
+                out.data_label_text[i] = Some(self.read_series_labels(r));
             }
         }
         out
@@ -2221,6 +2804,41 @@ impl App {
                     Err(_) => f64::NAN,
                 };
                 out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Parallel to `read_series_values`, but emits the user-visible
+    /// display string per cell. Used to populate `x_labels` so wedge
+    /// / tick renderers can label categorical positions with the
+    /// 1-2-3 idiom of "X-range cell text labels each item." Empty
+    /// for blank or error cells; numbers stringified as their value.
+    fn read_series_labels(&self, r: Range) -> Vec<String> {
+        let n = r.normalized();
+        let mut out = Vec::new();
+        for col in n.start.col..=n.end.col {
+            for row in n.start.row..=n.end.row {
+                let addr = Address {
+                    sheet: n.start.sheet,
+                    col,
+                    row,
+                };
+                let s = match self.wb().engine.get_cell(addr) {
+                    Ok(cv) => match cv.value {
+                        Value::Text(s) => s,
+                        Value::Number(f) => {
+                            if f.fract() == 0.0 && f.abs() < 1e16 {
+                                format!("{}", f as i64)
+                            } else {
+                                format!("{f}")
+                            }
+                        }
+                        _ => String::new(),
+                    },
+                    Err(_) => String::new(),
+                };
+                out.push(s);
             }
         }
         out
@@ -2983,9 +3601,324 @@ impl App {
                 self.wb_mut().current_graph.reset();
                 self.close_menu();
             }
+            Action::GraphResetX => self.execute_graph_clear_series(Series::X),
+            Action::GraphResetA => self.execute_graph_clear_series(Series::A),
+            Action::GraphResetB => self.execute_graph_clear_series(Series::B),
+            Action::GraphResetC => self.execute_graph_clear_series(Series::C),
+            Action::GraphResetD => self.execute_graph_clear_series(Series::D),
+            Action::GraphResetE => self.execute_graph_clear_series(Series::E),
+            Action::GraphResetF => self.execute_graph_clear_series(Series::F),
+            Action::GraphResetRanges => {
+                self.wb_mut().current_graph.reset_ranges();
+                self.close_menu();
+            }
+            Action::GraphResetOptions => {
+                self.wb_mut().current_graph.reset_options();
+                self.close_menu();
+            }
             Action::GraphView => self.enter_graph_view(),
             Action::GraphSave => self.start_graph_save_prompt(),
             Action::GraphQuit => self.close_menu(),
+            Action::GraphFeaturesVertical => {
+                self.wb_mut().current_graph.features.orientation =
+                    l123_graph::Orientation::Vertical;
+                self.close_menu();
+            }
+            Action::GraphFeaturesHorizontal => {
+                self.wb_mut().current_graph.features.orientation =
+                    l123_graph::Orientation::Horizontal;
+                self.close_menu();
+            }
+            Action::GraphFeaturesStackedYes => {
+                self.wb_mut().current_graph.features.stacked = true;
+                self.close_menu();
+            }
+            Action::GraphFeaturesStackedNo => {
+                self.wb_mut().current_graph.features.stacked = false;
+                self.close_menu();
+            }
+            Action::GraphFeaturesPercentYes => {
+                self.wb_mut().current_graph.features.percent = true;
+                self.close_menu();
+            }
+            Action::GraphFeaturesPercentNo => {
+                self.wb_mut().current_graph.features.percent = false;
+                self.close_menu();
+            }
+            Action::GraphFeaturesDropShadowYes => {
+                self.wb_mut().current_graph.features.drop_shadow = true;
+                self.close_menu();
+            }
+            Action::GraphFeaturesDropShadowNo => {
+                self.wb_mut().current_graph.features.drop_shadow = false;
+                self.close_menu();
+            }
+            Action::GraphFeaturesThreeDYes => {
+                self.wb_mut().current_graph.features.three_d = true;
+                self.close_menu();
+            }
+            Action::GraphFeaturesThreeDNo => {
+                self.wb_mut().current_graph.features.three_d = false;
+                self.close_menu();
+            }
+            Action::GraphFeaturesTableYes => {
+                self.wb_mut().current_graph.features.table = true;
+                self.close_menu();
+            }
+            Action::GraphFeaturesTableNo => {
+                self.wb_mut().current_graph.features.table = false;
+                self.close_menu();
+            }
+            Action::GraphFeaturesQuit => {
+                // Pop back into the parent /Graph Type menu rather than
+                // dismissing entirely, mirroring 1-2-3 R3.4a behavior.
+                // Reused by 2Y-Ranges, Y-Ranges, and Frame Quit leaves —
+                // each wants to pop one level.
+                if let Some(state) = self.menu.as_mut() {
+                    state.path.pop();
+                    state.highlight = 0;
+                }
+            }
+            Action::GraphFeatures2YGraph => self.set_graph_y_axis_all(l123_graph::YAxis::Second),
+            Action::GraphFeatures2YA => self.set_graph_y_axis(0, l123_graph::YAxis::Second),
+            Action::GraphFeatures2YB => self.set_graph_y_axis(1, l123_graph::YAxis::Second),
+            Action::GraphFeatures2YC => self.set_graph_y_axis(2, l123_graph::YAxis::Second),
+            Action::GraphFeatures2YD => self.set_graph_y_axis(3, l123_graph::YAxis::Second),
+            Action::GraphFeatures2YE => self.set_graph_y_axis(4, l123_graph::YAxis::Second),
+            Action::GraphFeatures2YF => self.set_graph_y_axis(5, l123_graph::YAxis::Second),
+            Action::GraphFeaturesYGraph => self.set_graph_y_axis_all(l123_graph::YAxis::First),
+            Action::GraphFeaturesYA => self.set_graph_y_axis(0, l123_graph::YAxis::First),
+            Action::GraphFeaturesYB => self.set_graph_y_axis(1, l123_graph::YAxis::First),
+            Action::GraphFeaturesYC => self.set_graph_y_axis(2, l123_graph::YAxis::First),
+            Action::GraphFeaturesYD => self.set_graph_y_axis(3, l123_graph::YAxis::First),
+            Action::GraphFeaturesYE => self.set_graph_y_axis(4, l123_graph::YAxis::First),
+            Action::GraphFeaturesYF => self.set_graph_y_axis(5, l123_graph::YAxis::First),
+            Action::GraphFeaturesFrameLeftYes => self.set_graph_frame_side(GraphFrameSide::Left, true),
+            Action::GraphFeaturesFrameLeftNo => self.set_graph_frame_side(GraphFrameSide::Left, false),
+            Action::GraphFeaturesFrameRightYes => self.set_graph_frame_side(GraphFrameSide::Right, true),
+            Action::GraphFeaturesFrameRightNo => self.set_graph_frame_side(GraphFrameSide::Right, false),
+            Action::GraphFeaturesFrameTopYes => self.set_graph_frame_side(GraphFrameSide::Top, true),
+            Action::GraphFeaturesFrameTopNo => self.set_graph_frame_side(GraphFrameSide::Top, false),
+            Action::GraphFeaturesFrameBottomYes => self.set_graph_frame_side(GraphFrameSide::Bottom, true),
+            Action::GraphFeaturesFrameBottomNo => self.set_graph_frame_side(GraphFrameSide::Bottom, false),
+            Action::GraphFeaturesFrameYAxisYes => self.set_graph_frame_side(GraphFrameSide::YAxis, true),
+            Action::GraphFeaturesFrameYAxisNo => self.set_graph_frame_side(GraphFrameSide::YAxis, false),
+            Action::GraphFeaturesFrameAll => self.set_graph_frame_all(true),
+            Action::GraphFeaturesFrameClear => self.set_graph_frame_all(false),
+            Action::GraphOptionsColor => {
+                self.wb_mut().current_graph.options.color = true;
+                self.close_menu();
+            }
+            Action::GraphOptionsBW => {
+                self.wb_mut().current_graph.options.color = false;
+                self.close_menu();
+            }
+            Action::GraphOptionsQuit => {
+                if let Some(state) = self.menu.as_mut() {
+                    state.path.pop();
+                    state.highlight = 0;
+                }
+            }
+            Action::GraphOptionsGridHorizontal => {
+                self.wb_mut().current_graph.options.grid.horizontal = true;
+                self.close_menu();
+            }
+            Action::GraphOptionsGridVertical => {
+                self.wb_mut().current_graph.options.grid.vertical = true;
+                self.close_menu();
+            }
+            Action::GraphOptionsGridBoth => {
+                let g = &mut self.wb_mut().current_graph.options.grid;
+                g.horizontal = true;
+                g.vertical = true;
+                self.close_menu();
+            }
+            Action::GraphOptionsGridClear => {
+                self.wb_mut().current_graph.options.grid = l123_graph::GridMask::default();
+                self.close_menu();
+            }
+            Action::GraphOptionsGridYAxisFirst => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::First));
+            }
+            Action::GraphOptionsGridYAxisSecond => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::Second));
+            }
+            Action::GraphOptionsGridYAxisBoth => {
+                self.set_graph_grid_y_axis(Some(l123_graph::GridYAxisOrigin::Both));
+            }
+            Action::GraphFormatGraphLines => self.set_graph_format(None, l123_graph::LineFormat::Lines),
+            Action::GraphFormatGraphSymbols => self.set_graph_format(None, l123_graph::LineFormat::Symbols),
+            Action::GraphFormatGraphBoth => self.set_graph_format(None, l123_graph::LineFormat::Both),
+            Action::GraphFormatGraphNeither => self.set_graph_format(None, l123_graph::LineFormat::Neither),
+            Action::GraphFormatGraphArea => self.set_graph_format(None, l123_graph::LineFormat::Area),
+            Action::GraphFormatALines => self.set_graph_format(Some(0), l123_graph::LineFormat::Lines),
+            Action::GraphFormatASymbols => self.set_graph_format(Some(0), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatABoth => self.set_graph_format(Some(0), l123_graph::LineFormat::Both),
+            Action::GraphFormatANeither => self.set_graph_format(Some(0), l123_graph::LineFormat::Neither),
+            Action::GraphFormatAArea => self.set_graph_format(Some(0), l123_graph::LineFormat::Area),
+            Action::GraphFormatBLines => self.set_graph_format(Some(1), l123_graph::LineFormat::Lines),
+            Action::GraphFormatBSymbols => self.set_graph_format(Some(1), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatBBoth => self.set_graph_format(Some(1), l123_graph::LineFormat::Both),
+            Action::GraphFormatBNeither => self.set_graph_format(Some(1), l123_graph::LineFormat::Neither),
+            Action::GraphFormatBArea => self.set_graph_format(Some(1), l123_graph::LineFormat::Area),
+            Action::GraphFormatCLines => self.set_graph_format(Some(2), l123_graph::LineFormat::Lines),
+            Action::GraphFormatCSymbols => self.set_graph_format(Some(2), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatCBoth => self.set_graph_format(Some(2), l123_graph::LineFormat::Both),
+            Action::GraphFormatCNeither => self.set_graph_format(Some(2), l123_graph::LineFormat::Neither),
+            Action::GraphFormatCArea => self.set_graph_format(Some(2), l123_graph::LineFormat::Area),
+            Action::GraphFormatDLines => self.set_graph_format(Some(3), l123_graph::LineFormat::Lines),
+            Action::GraphFormatDSymbols => self.set_graph_format(Some(3), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatDBoth => self.set_graph_format(Some(3), l123_graph::LineFormat::Both),
+            Action::GraphFormatDNeither => self.set_graph_format(Some(3), l123_graph::LineFormat::Neither),
+            Action::GraphFormatDArea => self.set_graph_format(Some(3), l123_graph::LineFormat::Area),
+            Action::GraphFormatELines => self.set_graph_format(Some(4), l123_graph::LineFormat::Lines),
+            Action::GraphFormatESymbols => self.set_graph_format(Some(4), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatEBoth => self.set_graph_format(Some(4), l123_graph::LineFormat::Both),
+            Action::GraphFormatENeither => self.set_graph_format(Some(4), l123_graph::LineFormat::Neither),
+            Action::GraphFormatEArea => self.set_graph_format(Some(4), l123_graph::LineFormat::Area),
+            Action::GraphFormatFLines => self.set_graph_format(Some(5), l123_graph::LineFormat::Lines),
+            Action::GraphFormatFSymbols => self.set_graph_format(Some(5), l123_graph::LineFormat::Symbols),
+            Action::GraphFormatFBoth => self.set_graph_format(Some(5), l123_graph::LineFormat::Both),
+            Action::GraphFormatFNeither => self.set_graph_format(Some(5), l123_graph::LineFormat::Neither),
+            Action::GraphFormatFArea => self.set_graph_format(Some(5), l123_graph::LineFormat::Area),
+            Action::GraphOptionsTitleFirst => self.start_graph_title_prompt(GraphTitleSlot::First),
+            Action::GraphOptionsTitleSecond => self.start_graph_title_prompt(GraphTitleSlot::Second),
+            Action::GraphOptionsTitleXAxis => self.start_graph_title_prompt(GraphTitleSlot::XAxis),
+            Action::GraphOptionsTitleYAxis => self.start_graph_title_prompt(GraphTitleSlot::YAxis),
+            Action::GraphOptionsTitle2YAxis => self.start_graph_title_prompt(GraphTitleSlot::TwoYAxis),
+            Action::GraphOptionsTitleNote => self.start_graph_title_prompt(GraphTitleSlot::Note),
+            Action::GraphOptionsTitleOtherNote => self.start_graph_title_prompt(GraphTitleSlot::OtherNote),
+            Action::GraphOptionsLegendA => self.start_graph_legend_prompt(0),
+            Action::GraphOptionsLegendB => self.start_graph_legend_prompt(1),
+            Action::GraphOptionsLegendC => self.start_graph_legend_prompt(2),
+            Action::GraphOptionsLegendD => self.start_graph_legend_prompt(3),
+            Action::GraphOptionsLegendE => self.start_graph_legend_prompt(4),
+            Action::GraphOptionsLegendF => self.start_graph_legend_prompt(5),
+            Action::GraphOptionsLegendRange => self.begin_point(PendingCommand::GraphLegendRange),
+            Action::GraphOptionsDataLabelsA => self.begin_point(PendingCommand::GraphDataLabels { slot: 0 }),
+            Action::GraphOptionsDataLabelsB => self.begin_point(PendingCommand::GraphDataLabels { slot: 1 }),
+            Action::GraphOptionsDataLabelsC => self.begin_point(PendingCommand::GraphDataLabels { slot: 2 }),
+            Action::GraphOptionsDataLabelsD => self.begin_point(PendingCommand::GraphDataLabels { slot: 3 }),
+            Action::GraphOptionsDataLabelsE => self.begin_point(PendingCommand::GraphDataLabels { slot: 4 }),
+            Action::GraphOptionsDataLabelsF => self.begin_point(PendingCommand::GraphDataLabels { slot: 5 }),
+            Action::GraphOptionsDataLabelsCenter => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Center)
+            }
+            Action::GraphOptionsDataLabelsLeft => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Left)
+            }
+            Action::GraphOptionsDataLabelsAbove => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Above)
+            }
+            Action::GraphOptionsDataLabelsRight => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Right)
+            }
+            Action::GraphOptionsDataLabelsBelow => {
+                self.apply_data_labels_placement(l123_graph::DataLabelPlacement::Below)
+            }
+            Action::GraphOptionsScaleYAuto => self.set_graph_scale_mode(GraphScaleAxis::Y, l123_graph::ScaleMode::Automatic),
+            Action::GraphOptionsScaleYManual => self.set_graph_scale_mode(GraphScaleAxis::Y, l123_graph::ScaleMode::Manual),
+            Action::GraphOptionsScaleXAuto => self.set_graph_scale_mode(GraphScaleAxis::X, l123_graph::ScaleMode::Automatic),
+            Action::GraphOptionsScaleXManual => self.set_graph_scale_mode(GraphScaleAxis::X, l123_graph::ScaleMode::Manual),
+            Action::GraphOptionsScale2YAuto => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Automatic),
+            Action::GraphOptionsScale2YManual => self.set_graph_scale_mode(GraphScaleAxis::TwoY, l123_graph::ScaleMode::Manual),
+            Action::GraphOptionsScaleSkip => self.start_graph_skip_prompt(),
+            Action::GraphOptionsScaleYLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::Y, false)
+            }
+            Action::GraphOptionsScaleYUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::Y, true)
+            }
+            Action::GraphOptionsScaleXLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::X, false)
+            }
+            Action::GraphOptionsScaleXUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::X, true)
+            }
+            Action::GraphOptionsScale2YLower => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::TwoY, false)
+            }
+            Action::GraphOptionsScale2YUpper => {
+                self.start_graph_scale_bound_prompt(GraphScaleAxis::TwoY, true)
+            }
+            Action::GraphOptionsScaleYTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::Y, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScaleYTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::Y, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScaleXTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::X, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScaleXTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::X, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScale2YTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::TwoY, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScale2YTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::TwoY, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScaleYWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::Y)
+            }
+            Action::GraphOptionsScaleXWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::X)
+            }
+            Action::GraphOptionsScale2YWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::TwoY)
+            }
+            Action::GraphOptionsScaleYExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::Y)
+            }
+            Action::GraphOptionsScaleXExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::X)
+            }
+            Action::GraphOptionsScale2YExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::TwoY)
+            }
+            Action::GraphOptionsScaleYIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScaleYIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScaleYIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::Manual)
+            }
+            Action::GraphOptionsScaleXIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScaleXIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScaleXIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::Manual)
+            }
+            Action::GraphOptionsScale2YIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScale2YIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScale2YIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::Manual)
+            }
+            Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
+            Action::GraphNameCreate => {
+                self.start_graph_name_prompt(PromptNext::GraphNameCreate, "Create")
+            }
+            Action::GraphNameDelete => {
+                self.start_graph_name_prompt(PromptNext::GraphNameDelete, "Delete")
+            }
+            Action::GraphNameReset => {
+                self.wb_mut().graphs.clear();
+                self.close_menu();
+            }
+            Action::GraphNameTable => self.begin_point(PendingCommand::GraphNameTable),
+            Action::GraphGroup => self.begin_point(PendingCommand::GraphGroup),
+            Action::GraphGroupColumnwise => self.apply_graph_group(GraphGroupOrientation::Columnwise),
+            Action::GraphGroupRowwise => self.apply_graph_group(GraphGroupOrientation::Rowwise),
             // Forward-declared in the menu enum but not yet implemented.
             // Hitting these from the menu currently is a no-op back to
             // READY; flesh out behavior when the feature lands.
@@ -5296,6 +6229,41 @@ impl App {
                 self.wb_mut().current_graph.set(series, first);
                 self.mode = Mode::Ready;
             }
+            PendingCommand::GraphDataLabels { slot } => {
+                if let Some(s) = self
+                    .wb_mut()
+                    .current_graph
+                    .options
+                    .data_labels
+                    .get_mut(slot)
+                {
+                    *s = Some(first);
+                }
+                // Root the placement follow-up submenu and stash
+                // the slot so the chosen leaf knows where to write.
+                self.pending_data_labels_slot = Some(slot);
+                self.menu = Some(MenuState::rooted_at(
+                    menu::GO_DATA_LABELS_PLACEMENT_MENU,
+                ));
+                self.mode = Mode::Menu;
+            }
+            PendingCommand::GraphLegendRange => {
+                let labels = self.read_series_labels(first);
+                let slots = &mut self.wb_mut().current_graph.options.legend;
+                for (i, slot) in slots.iter_mut().enumerate() {
+                    *slot = labels.get(i).filter(|s| !s.is_empty()).cloned();
+                }
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::GraphNameTable => {
+                self.execute_graph_name_table(first.start);
+                self.mode = Mode::Ready;
+            }
+            PendingCommand::GraphGroup => {
+                self.pending_graph_group_range = Some(first);
+                self.menu = Some(MenuState::rooted_at(menu::GRAPH_GROUP_ORIENT_MENU));
+                self.mode = Mode::Menu;
+            }
             PendingCommand::ColumnRangeSetWidth { width } => {
                 for r in ranges {
                     self.execute_col_range_width(*r, Some(width));
@@ -7558,6 +8526,57 @@ impl App {
         }
     }
 
+    /// `/Graph Name Table` — write a directory of every named graph
+    /// to two columns starting at `anchor`. Column 0 holds the
+    /// (alphabetized) name; column 1 holds the graph-type tag
+    /// (BAR / LINE / XY / STACK / PIE / HLCO / MIXED). Each entry
+    /// is committed via `write_cell_with_undo` so the table reuses
+    /// the same journal-batch + recalc path as /Range Name Table.
+    fn execute_graph_name_table(&mut self, anchor: Address) {
+        let mut entries: Vec<(String, l123_graph::GraphType)> = self
+            .wb()
+            .graphs
+            .iter()
+            .map(|(name, def)| (name.clone(), def.graph_type))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (i, (name, gtype)) in entries.iter().enumerate() {
+            let row = anchor.row.saturating_add(i as u32);
+            let name_addr = Address::new(anchor.sheet, anchor.col, row);
+            let type_addr = Address::new(anchor.sheet, anchor.col.saturating_add(1), row);
+            self.write_cell_with_undo(
+                name_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: name.clone(),
+                },
+                &mut writes,
+            );
+            self.write_cell_with_undo(
+                type_addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: graph_type_tag(*gtype).to_string(),
+                },
+                &mut writes,
+            );
+        }
+        if !writes.is_empty() {
+            self.push_journal_batch(vec![JournalEntry::RangeRestore {
+                cells: writes
+                    .into_iter()
+                    .map(|(addr, prev)| (addr, prev.unwrap_or(CellContents::Empty)))
+                    .collect(),
+                formats: Vec::new(),
+                text_styles: Vec::new(),
+            }]);
+            self.wb_mut().engine.recalc();
+            self.refresh_formula_caches();
+            self.wb_mut().dirty = true;
+        }
+    }
+
     fn execute_range_name_note_table(&mut self, anchor: Address) {
         let mut entries: Vec<(String, Range, String)> = self
             .wb()
@@ -7865,6 +8884,135 @@ impl App {
             PromptNext::DataFillStop { range, start, step } => {
                 let stop: f64 = p.buffer.parse().unwrap_or(2047.0);
                 self.execute_data_fill(range, start, step, stop);
+            }
+            PromptNext::GraphOptionsTitle { slot } => {
+                let buf = p.buffer;
+                let titles = &mut self.wb_mut().current_graph.options.titles;
+                let target = match slot {
+                    GraphTitleSlot::First => &mut titles.first,
+                    GraphTitleSlot::Second => &mut titles.second,
+                    GraphTitleSlot::XAxis => &mut titles.x_axis,
+                    GraphTitleSlot::YAxis => &mut titles.y_axis,
+                    GraphTitleSlot::TwoYAxis => &mut titles.two_y_axis,
+                    GraphTitleSlot::Note => &mut titles.note,
+                    GraphTitleSlot::OtherNote => &mut titles.other_note,
+                };
+                *target = if buf.is_empty() { None } else { Some(buf) };
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsLegend { slot } => {
+                let buf = p.buffer;
+                if let Some(target) = self
+                    .wb_mut()
+                    .current_graph
+                    .options
+                    .legend
+                    .get_mut(slot)
+                {
+                    *target = if buf.is_empty() { None } else { Some(buf) };
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleSkip => {
+                let current = self.wb().current_graph.options.skip;
+                let parsed: u32 = p.buffer.parse().unwrap_or(current);
+                let clamped = parsed.clamp(1, 8192);
+                self.wb_mut().current_graph.options.skip = clamped;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleAxisExponent { axis } => {
+                let trimmed = p.buffer.trim();
+                let new_val: i8 = if trimmed.is_empty() {
+                    0
+                } else {
+                    match trimmed.parse::<i32>() {
+                        Ok(v) => v.clamp(-19, 19) as i8,
+                        Err(_) => {
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let target = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                target.exponent = new_val;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleAxisWidth { axis } => {
+                let trimmed = p.buffer.trim();
+                let new_val: u8 = if trimmed.is_empty() {
+                    0
+                } else {
+                    match trimmed.parse::<u32>() {
+                        Ok(v) => v.min(40) as u8,
+                        Err(_) => {
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let target = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                target.width = new_val;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleBound { axis, upper } => {
+                let trimmed = p.buffer.trim();
+                let new_val: Option<f64> = if trimmed.is_empty() {
+                    None
+                } else {
+                    match trimmed.parse::<f64>() {
+                        Ok(v) if v.is_finite() => Some(v),
+                        _ => {
+                            // Unparseable input — leave the bound untouched.
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let s = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                if upper {
+                    s.upper = new_val;
+                } else {
+                    s.lower = new_val;
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameUse => {
+                if !p.buffer.is_empty() {
+                    if let Some(g) = self.wb().graphs.get(&p.buffer).cloned() {
+                        self.wb_mut().current_graph = g;
+                    }
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameCreate => {
+                let mut name = p.buffer;
+                if !name.is_empty() {
+                    name.truncate(15);
+                    let snapshot = self.wb().current_graph.clone();
+                    self.wb_mut().graphs.insert(name, snapshot);
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphNameDelete => {
+                if !p.buffer.is_empty() {
+                    self.wb_mut().graphs.remove(&p.buffer);
+                }
+                self.mode = Mode::Ready;
             }
             PromptNext::RangeNameCreate => {
                 if p.buffer.is_empty() {
