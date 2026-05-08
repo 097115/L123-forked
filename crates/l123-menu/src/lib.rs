@@ -710,6 +710,14 @@ pub enum Action {
     GraphOptionsScaleXUpper,
     GraphOptionsScale2YLower,
     GraphOptionsScale2YUpper,
+    /// `/Graph Options Scale {axis} Type {Linear|Logarithmic}` —
+    /// switch the per-axis mapping. Default Linear.
+    GraphOptionsScaleYTypeLinear,
+    GraphOptionsScaleYTypeLog,
+    GraphOptionsScaleXTypeLinear,
+    GraphOptionsScaleXTypeLog,
+    GraphOptionsScale2YTypeLinear,
+    GraphOptionsScale2YTypeLog,
     /// `/Graph Options Scale Skip` — numeric prompt; commit sets
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
@@ -4328,7 +4336,7 @@ const GO_ADVANCED_MENU: &[MenuItem] = &[
 // `width` fields.
 macro_rules! gos_axis_menu {
     ($auto:expr, $manual:expr, $lower:expr, $upper:expr, $format:literal,
-     $indicator:literal, $type_:literal, $exponent:literal, $width:literal) => {
+     $indicator:literal, $type_menu:expr, $exponent:literal, $width:literal) => {
         &[
             MenuItem {
                 letter: 'A',
@@ -4377,7 +4385,7 @@ macro_rules! gos_axis_menu {
                 name: "Type",
                 help: "Linear or logarithmic scale",
                 help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
-                body: MenuBody::NotImplemented($type_),
+                body: MenuBody::Submenu($type_menu),
             },
             MenuItem {
                 letter: 'E',
@@ -4404,6 +4412,58 @@ macro_rules! gos_axis_menu {
     };
 }
 
+// Linear/Logarithmic submenus rooted under `/Graph Options Scale
+// {axis} Type`. Letter mapping: N (liNear), L (Logarithmic) — N
+// chosen to avoid collision with L=Logarithmic.
+const GO_SCALE_Y_TYPE_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "Linear",
+        help: "Linear y-axis (default)",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleYTypeLinear),
+    },
+    MenuItem {
+        letter: 'L',
+        name: "Logarithmic",
+        help: "Logarithmic y-axis",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleYTypeLog),
+    },
+];
+const GO_SCALE_X_TYPE_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "Linear",
+        help: "Linear x-axis (default)",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleXTypeLinear),
+    },
+    MenuItem {
+        letter: 'L',
+        name: "Logarithmic",
+        help: "Logarithmic x-axis",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleXTypeLog),
+    },
+];
+const GO_SCALE_2Y_TYPE_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'N',
+        name: "Linear",
+        help: "Linear 2y-axis (default)",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScale2YTypeLinear),
+    },
+    MenuItem {
+        letter: 'L',
+        name: "Logarithmic",
+        help: "Logarithmic 2y-axis",
+        help_page: "0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html",
+        body: MenuBody::Action(Action::GraphOptionsScale2YTypeLog),
+    },
+];
+
 const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleYAuto,
     Action::GraphOptionsScaleYManual,
@@ -4411,7 +4471,7 @@ const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleYUpper,
     "gosy-format",
     "gosy-indicator",
-    "gosy-type",
+    GO_SCALE_Y_TYPE_MENU,
     "gosy-exponent",
     "gosy-width"
 );
@@ -4422,7 +4482,7 @@ const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleXUpper,
     "gosx-format",
     "gosx-indicator",
-    "gosx-type",
+    GO_SCALE_X_TYPE_MENU,
     "gosx-exponent",
     "gosx-width"
 );
@@ -4433,7 +4493,7 @@ const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScale2YUpper,
     "gos2-format",
     "gos2-indicator",
-    "gos2-type",
+    GO_SCALE_2Y_TYPE_MENU,
     "gos2-exponent",
     "gos2-width"
 );

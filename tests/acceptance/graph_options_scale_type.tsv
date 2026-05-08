@@ -1,0 +1,59 @@
+# /Graph Options Scale {Y|X|2Y} Type {Linear|Logarithmic} — store
+# the manual scale type per axis.
+#
+# Slice F (scale type) of GRAPH_PLAN.md. Until this slice the
+# Type leaf was a NotImplemented stub. After: a Linear / Log
+# submenu records `ScaleAxis::type_` per axis. Default Linear.
+# Reference p. 2-204, 0098-graph-options-scale-y-scale-x-scale-2y-scale-type.html.
+
+SIZE 80 30
+
+# Defaults: every axis Linear.
+ASSERT_GRAPH_SCALE_TYPE  Y   Linear
+ASSERT_GRAPH_SCALE_TYPE  X   Linear
+ASSERT_GRAPH_SCALE_TYPE  2Y  Linear
+
+# /GOSY T L — Y-Scale Type Logarithmic.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY T
+KEY L
+ASSERT_MODE              READY
+ASSERT_GRAPH_SCALE_TYPE  Y   Logarithmic
+ASSERT_GRAPH_SCALE_TYPE  X   Linear
+ASSERT_GRAPH_SCALE_TYPE  2Y  Linear
+
+# /GOSX T L — X-Scale Type Logarithmic.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY T
+KEY L
+ASSERT_GRAPH_SCALE_TYPE  X   Logarithmic
+
+# /GOS2 T L — 2Y-Scale Type Logarithmic.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY T
+KEY L
+ASSERT_GRAPH_SCALE_TYPE  2Y  Logarithmic
+
+# /GOSY T N — Y-Scale Type Linear (revert).
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY T
+KEY N
+ASSERT_GRAPH_SCALE_TYPE  Y   Linear
+ASSERT_GRAPH_SCALE_TYPE  X   Logarithmic
+ASSERT_GRAPH_SCALE_TYPE  2Y  Logarithmic

@@ -2297,6 +2297,23 @@ impl App {
         self.close_menu();
     }
 
+    /// Shared back end for the six per-axis Scale Type leaves. Sets
+    /// `ScaleAxis::type_` on the chosen axis and pops back to READY.
+    fn set_graph_scale_type(
+        &mut self,
+        axis: GraphScaleAxis,
+        type_: l123_graph::ScaleType,
+    ) {
+        let opts = &mut self.wb_mut().current_graph.options;
+        let target = match axis {
+            GraphScaleAxis::Y => &mut opts.scale_y,
+            GraphScaleAxis::X => &mut opts.scale_x,
+            GraphScaleAxis::TwoY => &mut opts.scale_2y,
+        };
+        target.type_ = type_;
+        self.close_menu();
+    }
+
     /// `/Graph Options Scale Skip` — numeric prompt seeded with the
     /// current skip count. `fresh: true` means the first keystroke
     /// clears the buffer (1-2-3 muscle-memory pattern).
@@ -2353,6 +2370,20 @@ impl App {
     pub fn graph_scale_skip(&self) -> u32 {
         self.wb().current_graph.options.skip
     }
+    /// Read accessor for `/Graph Options Scale {axis} Type` —
+    /// returns the `ScaleType::tag` string ("Linear" / "Logarithmic").
+    /// `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_type_str(&self, axis: char) -> &'static str {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return "",
+        };
+        s.type_.tag()
+    }
+
     /// Read accessor for `/Graph Options Scale {axis} {Lower|Upper}`.
     /// `axis` is 'Y', 'X', or '2'; `upper` selects which bound. Returns
     /// `None` when the bound is unset.
@@ -3706,6 +3737,24 @@ impl App {
             }
             Action::GraphOptionsScale2YUpper => {
                 self.start_graph_scale_bound_prompt(GraphScaleAxis::TwoY, true)
+            }
+            Action::GraphOptionsScaleYTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::Y, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScaleYTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::Y, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScaleXTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::X, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScaleXTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::X, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScale2YTypeLinear => {
+                self.set_graph_scale_type(GraphScaleAxis::TwoY, l123_graph::ScaleType::Linear)
+            }
+            Action::GraphOptionsScale2YTypeLog => {
+                self.set_graph_scale_type(GraphScaleAxis::TwoY, l123_graph::ScaleType::Logarithmic)
             }
             Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
             Action::GraphNameCreate => {

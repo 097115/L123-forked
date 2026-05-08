@@ -194,18 +194,39 @@ pub struct Titles {
     pub other_note: Option<String>,
 }
 
+/// `/Graph Options Scale {axis} Type` — Linear (default) or
+/// Logarithmic. Reference p. 2-204.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ScaleType {
+    #[default]
+    Linear,
+    Logarithmic,
+}
+
+impl ScaleType {
+    /// Stable ASCII tag, used by the `ASSERT_GRAPH_SCALE_TYPE`
+    /// transcript directive and the settings panel.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ScaleType::Linear => "Linear",
+            ScaleType::Logarithmic => "Logarithmic",
+        }
+    }
+}
+
 /// `/Graph Options Scale {axis}` settings, per axis.
 ///
 /// `lower` / `upper` are the manual bounds set via
 /// `/Graph Options Scale {Y|X|2Y} {Lower|Upper}`. They're stored
 /// independently of `mode` — 1-2-3 retains them when you toggle
 /// back to Automatic so re-entering Manual restores the prior
-/// limits.
+/// limits. `type_` selects the linear / logarithmic mapping.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct ScaleAxis {
     pub mode: ScaleMode,
     pub lower: Option<f64>,
     pub upper: Option<f64>,
+    pub type_: ScaleType,
 }
 
 impl ScaleAxis {

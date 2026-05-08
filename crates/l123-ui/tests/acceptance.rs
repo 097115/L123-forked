@@ -608,6 +608,21 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_SCALE_TYPE Y Linear" — axis token (Y, X,
+            // or 2) and expected scale type ("Linear" or
+            // "Logarithmic").
+            "ASSERT_GRAPH_SCALE_TYPE" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let got = app.graph_scale_type_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale type {axis_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_GRID_Y_AXIS Y" — current y-axis grid
             // origin (one of `none`, `Y`, `2Y`, `Both`).
             "ASSERT_GRAPH_GRID_Y_AXIS" => {
@@ -1344,6 +1359,7 @@ transcripts! {
     graph_name_table => "graph_name_table.tsv",
     graph_data_labels_placement => "graph_data_labels_placement.tsv",
     graph_options_grid_y_axis => "graph_options_grid_y_axis.tsv",
+    graph_options_scale_type => "graph_options_scale_type.tsv",
     graph_render_data_labels => "graph_render_data_labels.tsv",
     graph_render_data_labels_bar => "graph_render_data_labels_bar.tsv",
     graph_render_data_labels_stack => "graph_render_data_labels_stack.tsv",
