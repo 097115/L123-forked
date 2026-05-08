@@ -2329,6 +2329,28 @@ impl App {
         self.mode = Mode::Menu;
     }
 
+    fn start_graph_scale_width_prompt(&mut self, axis: GraphScaleAxis) {
+        let opts = &self.wb().current_graph.options;
+        let current = match axis {
+            GraphScaleAxis::Y => opts.scale_y.width,
+            GraphScaleAxis::X => opts.scale_x.width,
+            GraphScaleAxis::TwoY => opts.scale_2y.width,
+        };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale label width (0..40):"),
+            buffer: current.to_string(),
+            next: PromptNext::GraphOptionsScaleAxisWidth { axis },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
     fn start_graph_scale_bound_prompt(&mut self, axis: GraphScaleAxis, upper: bool) {
         let opts = &self.wb().current_graph.options;
         let s = match axis {
@@ -2370,6 +2392,19 @@ impl App {
     pub fn graph_scale_skip(&self) -> u32 {
         self.wb().current_graph.options.skip
     }
+    /// Read accessor for `/Graph Options Scale {axis} Width`. 0
+    /// means auto. `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_width(&self, axis: char) -> u8 {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return 0,
+        };
+        s.width
+    }
+
     /// Read accessor for `/Graph Options Scale {axis} Type` —
     /// returns the `ScaleType::tag` string ("Linear" / "Logarithmic").
     /// `axis` is 'Y', 'X', or '2'.
@@ -3755,6 +3790,15 @@ impl App {
             }
             Action::GraphOptionsScale2YTypeLog => {
                 self.set_graph_scale_type(GraphScaleAxis::TwoY, l123_graph::ScaleType::Logarithmic)
+            }
+            Action::GraphOptionsScaleYWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::Y)
+            }
+            Action::GraphOptionsScaleXWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::X)
+            }
+            Action::GraphOptionsScale2YWidth => {
+                self.start_graph_scale_width_prompt(GraphScaleAxis::TwoY)
             }
             Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
             Action::GraphNameCreate => {
@@ -8770,6 +8814,28 @@ impl App {
                 let parsed: u32 = p.buffer.parse().unwrap_or(current);
                 let clamped = parsed.clamp(1, 8192);
                 self.wb_mut().current_graph.options.skip = clamped;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleAxisWidth { axis } => {
+                let trimmed = p.buffer.trim();
+                let new_val: u8 = if trimmed.is_empty() {
+                    0
+                } else {
+                    match trimmed.parse::<u32>() {
+                        Ok(v) => v.min(40) as u8,
+                        Err(_) => {
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let target = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                target.width = new_val;
                 self.mode = Mode::Ready;
             }
             PromptNext::GraphOptionsScaleBound { axis, upper } => {

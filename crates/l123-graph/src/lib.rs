@@ -221,12 +221,15 @@ impl ScaleType {
 /// independently of `mode` — 1-2-3 retains them when you toggle
 /// back to Automatic so re-entering Manual restores the prior
 /// limits. `type_` selects the linear / logarithmic mapping.
+/// `width` is the maximum character width for the per-axis tick
+/// labels; 0 means "auto" (renderer picks).
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct ScaleAxis {
     pub mode: ScaleMode,
     pub lower: Option<f64>,
     pub upper: Option<f64>,
     pub type_: ScaleType,
+    pub width: u8,
 }
 
 impl ScaleAxis {

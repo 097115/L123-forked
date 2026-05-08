@@ -718,6 +718,11 @@ pub enum Action {
     GraphOptionsScaleXTypeLog,
     GraphOptionsScale2YTypeLinear,
     GraphOptionsScale2YTypeLog,
+    /// `/Graph Options Scale {axis} Width` — numeric prompt
+    /// clamped 0..=40. 0 means "auto".
+    GraphOptionsScaleYWidth,
+    GraphOptionsScaleXWidth,
+    GraphOptionsScale2YWidth,
     /// `/Graph Options Scale Skip` — numeric prompt; commit sets
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
@@ -4336,7 +4341,7 @@ const GO_ADVANCED_MENU: &[MenuItem] = &[
 // `width` fields.
 macro_rules! gos_axis_menu {
     ($auto:expr, $manual:expr, $lower:expr, $upper:expr, $format:literal,
-     $indicator:literal, $type_menu:expr, $exponent:literal, $width:literal) => {
+     $indicator:literal, $type_menu:expr, $exponent:literal, $width:expr) => {
         &[
             MenuItem {
                 letter: 'A',
@@ -4399,7 +4404,7 @@ macro_rules! gos_axis_menu {
                 name: "Width",
                 help: "Maximum width of scale labels",
                 help_page: "0099-graph-options-scale-y-scale-x-scale-2y-scale-width.html",
-                body: MenuBody::NotImplemented($width),
+                body: MenuBody::Action($width),
             },
             MenuItem {
                 letter: 'Q',
@@ -4473,7 +4478,7 @@ const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     "gosy-indicator",
     GO_SCALE_Y_TYPE_MENU,
     "gosy-exponent",
-    "gosy-width"
+    Action::GraphOptionsScaleYWidth
 );
 const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleXAuto,
@@ -4484,7 +4489,7 @@ const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     "gosx-indicator",
     GO_SCALE_X_TYPE_MENU,
     "gosx-exponent",
-    "gosx-width"
+    Action::GraphOptionsScaleXWidth
 );
 const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScale2YAuto,
@@ -4495,7 +4500,7 @@ const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     "gos2-indicator",
     GO_SCALE_2Y_TYPE_MENU,
     "gos2-exponent",
-    "gos2-width"
+    Action::GraphOptionsScale2YWidth
 );
 
 const GO_SCALE_MENU: &[MenuItem] = &[

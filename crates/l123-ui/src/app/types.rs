@@ -1381,6 +1381,11 @@ pub(super) enum PromptNext {
         axis: GraphScaleAxis,
         upper: bool,
     },
+    /// `/Graph Options Scale {axis} Width` — unsigned numeric prompt
+    /// for max scale-label width. Commit clamps to 0..=40.
+    GraphOptionsScaleAxisWidth {
+        axis: GraphScaleAxis,
+    },
     /// `/Graph Name Use` — text prompt; commit replaces
     /// `current_graph` with the matching entry from `Workbook::graphs`.
     /// Unknown names are no-ops.
@@ -1584,6 +1589,8 @@ impl PromptNext {
             PromptNext::GraphOptionsScaleBound { .. } => {
                 c.is_ascii_digit() || c == '-' || c == '.'
             }
+            // Scale Width is a small unsigned integer.
+            PromptNext::GraphOptionsScaleAxisWidth { .. } => c.is_ascii_digit(),
         }
     }
 }
