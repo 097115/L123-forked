@@ -505,10 +505,12 @@ where
     }
     mesh.draw()?;
     let n = x.len().min(y.len());
-    let points: Vec<(f64, f64)> = (0..n)
+    // Keep the original index so `data_label_text[0][orig_i]` lines
+    // up after the non-finite filter.
+    let points: Vec<(usize, f64, f64)> = (0..n)
         .filter_map(|i| {
             if x[i].is_finite() && y[i].is_finite() {
-                Some((x[i], y[i]))
+                Some((i, x[i], y[i]))
             } else {
                 None
             }
@@ -525,10 +527,26 @@ where
         .draw_series(
             points
                 .iter()
-                .map(|&(px, py)| Circle::new((px, py), 4, color.filled())),
+                .map(|(_, px, py)| Circle::new((*px, *py), 4, color.filled())),
         )?
         .label(label)
         .legend(move |(x, y)| Circle::new((x + 6, y), 4, color.filled()));
+    // Per-point data labels, when bound for slot 0.
+    if let Some(labels) = vals.data_label_text[0].as_deref() {
+        let placement = def.options.data_labels_placement[0];
+        let pos = placement_pos(placement);
+        chart.draw_series(points.iter().filter_map(|(orig_i, px, py)| {
+            let text = labels.get(*orig_i)?.clone();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Text::new(
+                text,
+                (*px, *py),
+                ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+            ))
+        }))?;
+    }
     chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
@@ -1311,6 +1329,41 @@ mod tests {
         let svg = render_svg(&def, &vals);
         assert!(svg.contains("HighA"), "HLCO SVG missing High legend");
         assert!(svg.contains("CloseC"), "HLCO SVG missing Close legend");
+    }
+
+    #[test]
+    fn svg_xy_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::XY,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            x: Some(vec![1.0, 2.0, 3.0]),
+            data: [
+                Some(vec![10.0, 20.0, 30.0]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["P1".into(), "P2".into(), "P3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["P1", "P2", "P3"] {
+            assert!(
+                svg.contains(label),
+                "raster XY SVG should embed bound data labels; missing {label:?}"
+            );
+        }
     }
 
     #[test]
