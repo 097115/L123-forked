@@ -215,38 +215,90 @@ where
         mesh.y_desc(t);
     }
     mesh.draw()?;
-    for (i, s) in series.iter().enumerate() {
-        let color = SERIES_PALETTE[i % SERIES_PALETTE.len()];
-        let points: Vec<(f64, f64)> = s
+    // Pair each populated series with its A..F slot so data labels
+    // and the legend text both look up by slot, not by populated
+    // position.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
+    for (palette_i, (slot, s)) in series_with_slot.iter().enumerate() {
+        let color = SERIES_PALETTE[palette_i % SERIES_PALETTE.len()];
+        let points: Vec<(usize, f64, f64)> = s
             .iter()
             .enumerate()
             .filter_map(|(idx, &v)| {
                 if v.is_finite() {
-                    Some((idx as f64, v))
+                    Some((idx, idx as f64, v))
                 } else {
                     None
                 }
             })
             .collect();
+        let xy_points: Vec<(f64, f64)> =
+            points.iter().map(|(_, x, y)| (*x, *y)).collect();
         let label = def
             .options
             .legend
-            .get(i)
+            .get(*slot)
             .and_then(|opt| opt.clone())
-            .unwrap_or_else(|| format!("Series {}", (b'A' + i as u8) as char));
+            .unwrap_or_else(|| format!("Series {}", (b'A' + *slot as u8) as char));
         chart
-            .draw_series(LineSeries::new(points.clone(), color.stroke_width(2)))?
+            .draw_series(LineSeries::new(xy_points.clone(), color.stroke_width(2)))?
             .label(label)
             .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color));
         // Visible markers at each point.
         chart.draw_series(
-            points
-                .into_iter()
-                .map(|(x, y)| Circle::new((x, y), 3, color.filled())),
+            xy_points
+                .iter()
+                .map(|(x, y)| Circle::new((*x, *y), 3, color.filled())),
         )?;
+        // Per-point data labels, when bound for this slot. Anchor
+        // each label at the data point and let `placement_pos`
+        // translate the placement enum into a TextStyle alignment
+        // so the label sits above / below / to the side of the dot.
+        if let Some(labels) = vals.data_label_text.get(*slot).and_then(|o| o.as_deref()) {
+            let placement = def.options.data_labels_placement[*slot];
+            let pos = placement_pos(placement);
+            chart.draw_series(points.iter().filter_map(|(orig_i, x, y)| {
+                labels
+                    .get(*orig_i)
+                    .filter(|s| !s.is_empty())
+                    .map(|text| {
+                        Text::new(
+                            text.clone(),
+                            (*x, *y),
+                            ("sans-serif", 14)
+                                .into_font()
+                                .color(&BLACK)
+                                .pos(pos),
+                        )
+                    })
+            }))?;
+        }
     }
     chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
+}
+
+/// Translate a [`DataLabelPlacement`] into a plotters `Pos` so the
+/// `Text` element anchored at a data point lands at the right
+/// offset relative to the point. plotters positions text by where
+/// its bounding box's anchor point falls, so e.g. `(Center, Bottom)`
+/// puts the bottom-centre of the label at the data coord — making
+/// the label float **above** the dot.
+fn placement_pos(p: crate::DataLabelPlacement) -> plotters::style::text_anchor::Pos {
+    use plotters::style::text_anchor::{HPos, Pos, VPos};
+    use crate::DataLabelPlacement::*;
+    match p {
+        Above => Pos::new(HPos::Center, VPos::Bottom),
+        Below => Pos::new(HPos::Center, VPos::Top),
+        Left => Pos::new(HPos::Right, VPos::Center),
+        Right => Pos::new(HPos::Left, VPos::Center),
+        Center => Pos::new(HPos::Center, VPos::Center),
+    }
 }
 
 fn draw_bar<DB>(
@@ -1345,6 +1397,40 @@ mod tests {
             svg.contains("Q1 Sales"),
             "bar SVG should embed the user-set legend text"
         );
+    }
+
+    #[test]
+    fn svg_line_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Line,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![10.0, 20.0, 30.0]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["Q1".into(), "Q2".into(), "Q3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["Q1", "Q2", "Q3"] {
+            assert!(
+                svg.contains(label),
+                "raster line SVG should embed bound data labels; missing {label:?}"
+            );
+        }
     }
 
     #[test]
