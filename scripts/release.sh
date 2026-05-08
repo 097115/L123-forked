@@ -111,10 +111,19 @@ if ! grep -q "^\.TH L123 1 \"${today}\" \"l123 ${new}\"" "$manpage"; then
   exit 1
 fi
 
+# Bump the version reference in README.md ("Currently `vX.Y.Z`,").
+readme="README.md"
+sed -i '' -E "s/Currently \`v${current//./\\.}\`,/Currently \`v${new}\`,/" "$readme"
+
+if ! grep -q "Currently \`v${new}\`," "$readme"; then
+  echo "error: ${readme} version line did not get rewritten as expected" >&2
+  exit 1
+fi
+
 # Refresh lockfile so the new version flows through.
 cargo build --workspace --quiet
 
-git add Cargo.toml Cargo.lock "$manpage"
+git add Cargo.toml Cargo.lock "$manpage" "$readme"
 git commit -m "Bump to ${new}"
 
 git tag -a "$tag" -m "l123 ${new}"
