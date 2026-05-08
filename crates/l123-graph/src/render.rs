@@ -1158,6 +1158,16 @@ fn render_hlco(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer)
                 cell.set_style(open_style);
             }
         }
+        // Per-bar data label, when bound for slot 0 (the High
+        // series, which is HLCO's primary anchor for labels).
+        if let Some(label) = vals.data_label_text[0]
+            .as_deref()
+            .and_then(|labels| labels.get(i).filter(|s| !s.is_empty()))
+        {
+            let bar_top_y = to_y(bar_top);
+            let placement = def.options.data_labels_placement[0];
+            paint_data_label(label, bx, bar_top_y, placement, area, buf);
+        }
     }
     for x in area.left()..area.right() {
         let cell = &mut buf[(x, plot_bottom)];
