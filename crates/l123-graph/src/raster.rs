@@ -627,12 +627,29 @@ where
                 Histogram::vertical(&chart)
                     .style(color.filled())
                     .margin(6)
-                    .data(points),
+                    .data(points.clone()),
             )?
             .label(label)
             .legend(move |(x, y)| {
                 Rectangle::new([(x, y - 5), (x + 12, y + 5)], color.filled())
             });
+        // Per-segment data labels, anchored at the segment's top
+        // (the running cumulative total after this layer).
+        if let Some(labels) = vals.data_label_text[*slot].as_deref() {
+            let placement = def.options.data_labels_placement[*slot];
+            let pos = placement_pos(placement);
+            chart.draw_series(points.iter().filter_map(|(i, top)| {
+                let text = labels.get(*i as usize)?.clone();
+                if text.is_empty() {
+                    return None;
+                }
+                Some(Text::new(
+                    text,
+                    (SegmentValue::CenterOf(*i), *top),
+                    ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+                ))
+            }))?;
+        }
     }
     chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
@@ -1323,6 +1340,40 @@ mod tests {
             !svg.contains("Series A"),
             "fallback legend leaked through"
         );
+    }
+
+    #[test]
+    fn svg_stack_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::Stack,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![1.0, 2.0, 3.0]),
+                Some(vec![1.0, 1.0, 1.0]),
+                None,
+                None,
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["A1".into(), "A2".into(), "A3".into()]),
+                Some(vec!["B1".into(), "B2".into(), "B3".into()]),
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["A1", "A2", "A3", "B1", "B2", "B3"] {
+            assert!(
+                svg.contains(label),
+                "raster stack SVG should embed bound data labels; missing {label:?}"
+            );
+        }
     }
 
     #[test]
