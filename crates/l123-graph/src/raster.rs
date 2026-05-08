@@ -877,6 +877,28 @@ where
             .label(open_label)
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 12, y)], RED.stroke_width(2)));
     }
+    // Per-bar data labels, anchored at the bar's high point. Slot 0
+    // (the High series) is HLCO's primary anchor for labels — same
+    // convention as the unicode F10 view.
+    if let Some(labels) = vals.data_label_text[0].as_deref() {
+        let placement = def.options.data_labels_placement[0];
+        let pos = placement_pos(placement);
+        chart.draw_series(high.iter().enumerate().take(n).filter_map(|(i, &h)| {
+            let l = low.get(i).copied().unwrap_or(f64::NAN);
+            if !h.is_finite() || !l.is_finite() {
+                return None;
+            }
+            let text = labels.get(i)?.clone();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Text::new(
+                text,
+                (i as f64, h.max(l)),
+                ("sans-serif", 14).into_font().color(&BLACK).pos(pos),
+            ))
+        }))?;
+    }
     chart.configure_series_labels().border_style(BLACK).draw()?;
     Ok(())
 }
@@ -1301,6 +1323,40 @@ mod tests {
         let svg = render_svg(&def, &vals);
         assert!(svg.contains("ABars"), "Mixed SVG missing A-bars legend");
         assert!(svg.contains("BLine"), "Mixed SVG missing B-line legend");
+    }
+
+    #[test]
+    fn svg_hlco_emits_data_labels_when_bound() {
+        let def = GraphDef {
+            graph_type: GraphType::HLCO,
+            ..Default::default()
+        };
+        let vals = GraphValues {
+            data: [
+                Some(vec![10.0, 11.0, 12.0]),
+                Some(vec![8.0, 9.0, 10.0]),
+                Some(vec![9.0, 10.5, 11.0]),
+                Some(vec![8.5, 10.0, 10.5]),
+                None,
+                None,
+            ],
+            data_label_text: [
+                Some(vec!["D1".into(), "D2".into(), "D3".into()]),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &vals);
+        for label in ["D1", "D2", "D3"] {
+            assert!(
+                svg.contains(label),
+                "raster HLCO SVG should embed bound data labels; missing {label:?}"
+            );
+        }
     }
 
     #[test]
