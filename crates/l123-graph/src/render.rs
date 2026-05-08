@@ -114,11 +114,11 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
                 render_bar(def, vals, inner, buf, def.features.drop_shadow)
             }
             (crate::Orientation::Vertical, true) => {
-                render_bar_stacked(vals, inner, buf, def.features.percent)
+                render_bar_stacked(def, vals, inner, buf, def.features.percent)
             }
             (crate::Orientation::Horizontal, _) => render_bar_horizontal(vals, inner, buf),
         },
-        GraphType::Stack => render_bar_stacked(vals, inner, buf, def.features.percent),
+        GraphType::Stack => render_bar_stacked(def, vals, inner, buf, def.features.percent),
         GraphType::Line => render_line(def, vals, inner, buf),
         GraphType::Pie => render_pie(vals, inner, buf),
         GraphType::XY => render_xy(def, vals, inner, buf),
@@ -706,10 +706,29 @@ fn render_bar(
 /// blending — because a single Buffer cell can carry only one glyph
 /// + style, and mixing two series across one cell can't be
 ///   represented faithfully.
-fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer, percent: bool) {
+///
+/// When the matching slot's data labels are bound, each segment's
+/// cell text is painted at the placement offset relative to the
+/// segment's top — same idiom as the Bar / Line renderers.
+fn render_bar_stacked(
+    def: &GraphDef,
+    vals: &GraphValues,
+    area: Rect,
+    buf: &mut Buffer,
+    percent: bool,
+) {
     const GLYPHS: [&str; 4] = ["█", "▓", "▒", "░"];
 
-    let series: Vec<&[f64]> = vals.data.iter().filter_map(|o| o.as_deref()).collect();
+    // Pair each populated series with its original A..F slot so
+    // `data_label_text[slot]` and `data_labels_placement[slot]`
+    // line up.
+    let series_with_slot: Vec<(usize, &[f64])> = vals
+        .data
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, o)| o.as_deref().map(|s| (slot, s)))
+        .collect();
+    let series: Vec<&[f64]> = series_with_slot.iter().map(|(_, s)| *s).collect();
     if series.is_empty() {
         write_centered(area, buf, "No A..F data to stack.");
         return;
@@ -794,6 +813,21 @@ fn render_bar_stacked(vals: &GraphValues, area: Rect, buf: &mut Buffer, percent:
                 }
             }
             row_offset = row_offset.saturating_add(segment_rows);
+            // Per-segment data label, if bound for this slot. The
+            // segment's top y is `plot_bottom - row_offset` after the
+            // row_offset increment above.
+            let (slot, _) = series_with_slot[si];
+            if let Some(label) = vals
+                .data_label_text
+                .get(slot)
+                .and_then(|opt| opt.as_deref())
+                .and_then(|labels| labels.get(i).filter(|s| !s.is_empty()))
+            {
+                let segment_top_y = plot_bottom.saturating_sub(row_offset);
+                let center_x = x0 + bar_width / 2;
+                let placement = def.options.data_labels_placement[slot];
+                paint_data_label(label, center_x, segment_top_y, placement, area, buf);
+            }
         }
     }
     // Baseline row of `─`.
