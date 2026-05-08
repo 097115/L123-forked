@@ -214,6 +214,36 @@ impl ScaleType {
     }
 }
 
+/// `/Graph Options Scale {axis} Indicator` — controls whether the
+/// per-axis magnitude indicator (e.g. "× 1000") appears next to
+/// the tick labels.
+///
+/// `Yes` (default) lets the renderer auto-pick when the data
+/// range warrants one. `No` suppresses it. `Manual` is
+/// authentic-Lotus terminology for "I'll supply the indicator
+/// text" — the per-axis text prompt that drives Manual is a
+/// follow-up; for now the variant is stored but the indicator
+/// behaves like `Yes`. Reference p. 2-204.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ScaleIndicator {
+    #[default]
+    Yes,
+    No,
+    Manual,
+}
+
+impl ScaleIndicator {
+    /// Stable ASCII tag, used by the
+    /// `ASSERT_GRAPH_SCALE_INDICATOR` transcript directive.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ScaleIndicator::Yes => "Yes",
+            ScaleIndicator::No => "No",
+            ScaleIndicator::Manual => "Manual",
+        }
+    }
+}
+
 /// `/Graph Options Scale {axis}` settings, per axis.
 ///
 /// `lower` / `upper` are the manual bounds set via
@@ -234,6 +264,7 @@ pub struct ScaleAxis {
     pub type_: ScaleType,
     pub width: u8,
     pub exponent: i8,
+    pub indicator: ScaleIndicator,
 }
 
 impl ScaleAxis {

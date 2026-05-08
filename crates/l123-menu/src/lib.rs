@@ -728,6 +728,17 @@ pub enum Action {
     GraphOptionsScaleYExponent,
     GraphOptionsScaleXExponent,
     GraphOptionsScale2YExponent,
+    /// `/Graph Options Scale {axis} Indicator {Yes|No|Manual}` —
+    /// magnitude indicator setting. Default Yes.
+    GraphOptionsScaleYIndicatorYes,
+    GraphOptionsScaleYIndicatorNo,
+    GraphOptionsScaleYIndicatorManual,
+    GraphOptionsScaleXIndicatorYes,
+    GraphOptionsScaleXIndicatorNo,
+    GraphOptionsScaleXIndicatorManual,
+    GraphOptionsScale2YIndicatorYes,
+    GraphOptionsScale2YIndicatorNo,
+    GraphOptionsScale2YIndicatorManual,
     /// `/Graph Options Scale Skip` — numeric prompt; commit sets
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
@@ -4346,7 +4357,7 @@ const GO_ADVANCED_MENU: &[MenuItem] = &[
 // `width` fields.
 macro_rules! gos_axis_menu {
     ($auto:expr, $manual:expr, $lower:expr, $upper:expr, $format:literal,
-     $indicator:literal, $type_menu:expr, $exponent:expr, $width:expr) => {
+     $indicator_menu:expr, $type_menu:expr, $exponent:expr, $width:expr) => {
         &[
             MenuItem {
                 letter: 'A',
@@ -4388,7 +4399,7 @@ macro_rules! gos_axis_menu {
                 name: "Indicator",
                 help: "Scale indicator (Yes/No/Manual)",
                 help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
-                body: MenuBody::NotImplemented($indicator),
+                body: MenuBody::Submenu($indicator_menu),
             },
             MenuItem {
                 letter: 'T',
@@ -4421,6 +4432,78 @@ macro_rules! gos_axis_menu {
         ]
     };
 }
+
+// Yes/No/Manual submenus rooted under `/Graph Options Scale
+// {axis} Indicator`.
+const GO_SCALE_Y_INDICATOR_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleYIndicatorYes),
+    },
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleYIndicatorNo),
+    },
+    MenuItem {
+        letter: 'M',
+        name: "Manual",
+        help: "Use a manual y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleYIndicatorManual),
+    },
+];
+const GO_SCALE_X_INDICATOR_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the x-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleXIndicatorYes),
+    },
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the x-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleXIndicatorNo),
+    },
+    MenuItem {
+        letter: 'M',
+        name: "Manual",
+        help: "Use a manual x-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScaleXIndicatorManual),
+    },
+];
+const GO_SCALE_2Y_INDICATOR_MENU: &[MenuItem] = &[
+    MenuItem {
+        letter: 'Y',
+        name: "Yes",
+        help: "Show the 2y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScale2YIndicatorYes),
+    },
+    MenuItem {
+        letter: 'N',
+        name: "No",
+        help: "Hide the 2y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScale2YIndicatorNo),
+    },
+    MenuItem {
+        letter: 'M',
+        name: "Manual",
+        help: "Use a manual 2y-axis magnitude indicator",
+        help_page: "0097-graph-options-scale-y-scale-x-scale-2y-scale-indicator.html",
+        body: MenuBody::Action(Action::GraphOptionsScale2YIndicatorManual),
+    },
+];
 
 // Linear/Logarithmic submenus rooted under `/Graph Options Scale
 // {axis} Type`. Letter mapping: N (liNear), L (Logarithmic) — N
@@ -4480,7 +4563,7 @@ const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleYLower,
     Action::GraphOptionsScaleYUpper,
     "gosy-format",
-    "gosy-indicator",
+    GO_SCALE_Y_INDICATOR_MENU,
     GO_SCALE_Y_TYPE_MENU,
     Action::GraphOptionsScaleYExponent,
     Action::GraphOptionsScaleYWidth
@@ -4491,7 +4574,7 @@ const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScaleXLower,
     Action::GraphOptionsScaleXUpper,
     "gosx-format",
-    "gosx-indicator",
+    GO_SCALE_X_INDICATOR_MENU,
     GO_SCALE_X_TYPE_MENU,
     Action::GraphOptionsScaleXExponent,
     Action::GraphOptionsScaleXWidth
@@ -4502,7 +4585,7 @@ const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     Action::GraphOptionsScale2YLower,
     Action::GraphOptionsScale2YUpper,
     "gos2-format",
-    "gos2-indicator",
+    GO_SCALE_2Y_INDICATOR_MENU,
     GO_SCALE_2Y_TYPE_MENU,
     Action::GraphOptionsScale2YExponent,
     Action::GraphOptionsScale2YWidth

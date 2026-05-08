@@ -608,6 +608,20 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_SCALE_INDICATOR Y Yes" — axis token (Y,
+            // X, or 2) and expected magnitude indicator setting.
+            "ASSERT_GRAPH_SCALE_INDICATOR" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let got = app.graph_scale_indicator_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale indicator {axis_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_SCALE_EXPONENT Y 3" — axis token (Y, X,
             // or 2) and expected order-of-magnitude shift.
             "ASSERT_GRAPH_SCALE_EXPONENT" => {
@@ -1402,6 +1416,7 @@ transcripts! {
     graph_options_scale_type => "graph_options_scale_type.tsv",
     graph_options_scale_width => "graph_options_scale_width.tsv",
     graph_options_scale_exponent => "graph_options_scale_exponent.tsv",
+    graph_options_scale_indicator => "graph_options_scale_indicator.tsv",
     graph_render_data_labels => "graph_render_data_labels.tsv",
     graph_render_data_labels_bar => "graph_render_data_labels_bar.tsv",
     graph_render_data_labels_stack => "graph_render_data_labels_stack.tsv",

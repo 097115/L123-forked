@@ -2314,6 +2314,24 @@ impl App {
         self.close_menu();
     }
 
+    /// Shared back end for the nine per-axis Scale Indicator leaves
+    /// (axis × {Yes, No, Manual}). Sets `ScaleAxis::indicator` on
+    /// the chosen axis and pops back to READY.
+    fn set_graph_scale_indicator(
+        &mut self,
+        axis: GraphScaleAxis,
+        indicator: l123_graph::ScaleIndicator,
+    ) {
+        let opts = &mut self.wb_mut().current_graph.options;
+        let target = match axis {
+            GraphScaleAxis::Y => &mut opts.scale_y,
+            GraphScaleAxis::X => &mut opts.scale_x,
+            GraphScaleAxis::TwoY => &mut opts.scale_2y,
+        };
+        target.indicator = indicator;
+        self.close_menu();
+    }
+
     /// `/Graph Options Scale Skip` — numeric prompt seeded with the
     /// current skip count. `fresh: true` means the first keystroke
     /// clears the buffer (1-2-3 muscle-memory pattern).
@@ -2414,6 +2432,20 @@ impl App {
     pub fn graph_scale_skip(&self) -> u32 {
         self.wb().current_graph.options.skip
     }
+    /// Read accessor for `/Graph Options Scale {axis} Indicator` —
+    /// returns the `ScaleIndicator::tag` string ("Yes" / "No" /
+    /// "Manual"). `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_indicator_str(&self, axis: char) -> &'static str {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return "",
+        };
+        s.indicator.tag()
+    }
+
     /// Read accessor for `/Graph Options Scale {axis} Exponent`.
     /// 0 means auto. Range is -19..=19 per the 1-2-3 R3.4a docs.
     /// `axis` is 'Y', 'X', or '2'.
@@ -3844,6 +3876,33 @@ impl App {
             }
             Action::GraphOptionsScale2YExponent => {
                 self.start_graph_scale_exponent_prompt(GraphScaleAxis::TwoY)
+            }
+            Action::GraphOptionsScaleYIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScaleYIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScaleYIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::Y, l123_graph::ScaleIndicator::Manual)
+            }
+            Action::GraphOptionsScaleXIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScaleXIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScaleXIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::X, l123_graph::ScaleIndicator::Manual)
+            }
+            Action::GraphOptionsScale2YIndicatorYes => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::Yes)
+            }
+            Action::GraphOptionsScale2YIndicatorNo => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::No)
+            }
+            Action::GraphOptionsScale2YIndicatorManual => {
+                self.set_graph_scale_indicator(GraphScaleAxis::TwoY, l123_graph::ScaleIndicator::Manual)
             }
             Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
             Action::GraphNameCreate => {
