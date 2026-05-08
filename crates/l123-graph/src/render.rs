@@ -1231,24 +1231,25 @@ fn render_xy(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         return;
     }
 
-    let pairs: Vec<(f64, f64)> = (0..n)
+    // Keep the original index alongside each filtered pair so the
+    // matching `data_label_text[0][orig_i]` lines up after the
+    // non-finite filter.
+    let pairs: Vec<(usize, f64, f64)> = (0..n)
         .filter(|i| xs[*i].is_finite() && ys[*i].is_finite())
-        .map(|i| (xs[i], ys[i]))
+        .map(|i| (i, xs[i], ys[i]))
         .collect();
     if pairs.is_empty() {
         write_centered(area, buf, "XY needs finite X and A values.");
         return;
     }
-    let (data_x_min, data_x_max) = pairs
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (x, _)| {
-            (lo.min(*x), hi.max(*x))
-        });
-    let (data_y_min, data_y_max) = pairs
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, y)| {
-            (lo.min(*y), hi.max(*y))
-        });
+    let (data_x_min, data_x_max) = pairs.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), (_, x, _)| (lo.min(*x), hi.max(*x)),
+    );
+    let (data_y_min, data_y_max) = pairs.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), (_, _, y)| (lo.min(*y), hi.max(*y)),
+    );
     let (x_min, x_max) = def.options.scale_x.apply(data_x_min, data_x_max);
     let (y_min, y_max) = def.options.scale_y.apply(data_y_min, data_y_max);
     let x_span = if (x_max - x_min).abs() < f64::EPSILON {
@@ -1262,7 +1263,9 @@ fn render_xy(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
         y_max - y_min
     };
     let style = Style::default().fg(Color::Cyan);
-    for (x, y) in pairs {
+    let label_placement = def.options.data_labels_placement[0];
+    let labels = vals.data_label_text[0].as_deref();
+    for (orig_i, x, y) in pairs {
         // Clip to the effective X / Y windows so manual bounds
         // actually constrain the plot.
         if x < x_min || x > x_max || y < y_min || y > y_max {
@@ -1277,6 +1280,12 @@ fn render_xy(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
             let cell = &mut buf[(bx, by)];
             cell.set_symbol("•");
             cell.set_style(style);
+        }
+        // Per-dot data label, when bound for slot 0.
+        if let Some(label) = labels
+            .and_then(|labels| labels.get(orig_i).filter(|s| !s.is_empty()))
+        {
+            paint_data_label(label, bx, by, label_placement, area, buf);
         }
     }
     for x in area.left()..area.right() {
