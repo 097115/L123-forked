@@ -116,7 +116,7 @@ pub fn render(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) 
             (crate::Orientation::Vertical, true) => {
                 render_bar_stacked(def, vals, inner, buf, def.features.percent)
             }
-            (crate::Orientation::Horizontal, _) => render_bar_horizontal(vals, inner, buf),
+            (crate::Orientation::Horizontal, _) => render_bar_horizontal(def, vals, inner, buf),
         },
         GraphType::Stack => render_bar_stacked(def, vals, inner, buf, def.features.percent),
         GraphType::Line => render_line(def, vals, inner, buf),
@@ -843,8 +843,8 @@ fn render_bar_stacked(
 /// proportion to the value. Half-cells at the right end use `▌`
 /// (LEFT HALF BLOCK), which fills the left half of the cell so the
 /// bar appears to stop mid-cell.
-fn render_bar_horizontal(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
-    let Some(series) = vals.first_series() else {
+fn render_bar_horizontal(def: &GraphDef, vals: &GraphValues, area: Rect, buf: &mut Buffer) {
+    let Some((slot, series)) = vals.first_series_with_slot() else {
         write_centered(area, buf, "No numeric A-series values to plot.");
         return;
     };
@@ -905,6 +905,22 @@ fn render_bar_horizontal(vals: &GraphValues, area: Rect, buf: &mut Buffer) {
                     cell.set_style(style);
                 }
             }
+        }
+        // Per-bar data label, when bound for this slot. Anchor at
+        // the bar's right end (just past the last filled cell) and
+        // the bar's vertical centre. Right placement reads as "to
+        // the right of the bar"; Above / Below land one row above
+        // or below; Center / Left fall inside the bar interior.
+        if let Some(label) = vals
+            .data_label_text
+            .get(slot)
+            .and_then(|opt| opt.as_deref())
+            .and_then(|labels| labels.get(i).filter(|s| !s.is_empty()))
+        {
+            let bar_end_x = plot_left + full_cols + u16::from(has_half);
+            let center_y = y0 + bar_height / 2;
+            let placement = def.options.data_labels_placement[slot];
+            paint_data_label(label, bar_end_x, center_y, placement, area, buf);
         }
     }
     // Vertical baseline column of `│` on the left.
