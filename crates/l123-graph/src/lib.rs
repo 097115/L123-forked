@@ -222,7 +222,10 @@ impl ScaleType {
 /// back to Automatic so re-entering Manual restores the prior
 /// limits. `type_` selects the linear / logarithmic mapping.
 /// `width` is the maximum character width for the per-axis tick
-/// labels; 0 means "auto" (renderer picks).
+/// labels; 0 means "auto" (renderer picks). `exponent` is the
+/// order-of-magnitude shift applied to the labels (e.g. `3` shows
+/// "× 1000" indicator and divides labels by 1000); 0 lets the
+/// renderer pick automatically.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct ScaleAxis {
     pub mode: ScaleMode,
@@ -230,6 +233,7 @@ pub struct ScaleAxis {
     pub upper: Option<f64>,
     pub type_: ScaleType,
     pub width: u8,
+    pub exponent: i8,
 }
 
 impl ScaleAxis {

@@ -2329,6 +2329,28 @@ impl App {
         self.mode = Mode::Menu;
     }
 
+    fn start_graph_scale_exponent_prompt(&mut self, axis: GraphScaleAxis) {
+        let opts = &self.wb().current_graph.options;
+        let current = match axis {
+            GraphScaleAxis::Y => opts.scale_y.exponent,
+            GraphScaleAxis::X => opts.scale_x.exponent,
+            GraphScaleAxis::TwoY => opts.scale_2y.exponent,
+        };
+        let axis_label = match axis {
+            GraphScaleAxis::Y => "Y",
+            GraphScaleAxis::X => "X",
+            GraphScaleAxis::TwoY => "2Y",
+        };
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: format!("Enter {axis_label}-Scale exponent (-19..19):"),
+            buffer: current.to_string(),
+            next: PromptNext::GraphOptionsScaleAxisExponent { axis },
+            fresh: true,
+        });
+        self.mode = Mode::Menu;
+    }
+
     fn start_graph_scale_width_prompt(&mut self, axis: GraphScaleAxis) {
         let opts = &self.wb().current_graph.options;
         let current = match axis {
@@ -2392,6 +2414,20 @@ impl App {
     pub fn graph_scale_skip(&self) -> u32 {
         self.wb().current_graph.options.skip
     }
+    /// Read accessor for `/Graph Options Scale {axis} Exponent`.
+    /// 0 means auto. Range is -19..=19 per the 1-2-3 R3.4a docs.
+    /// `axis` is 'Y', 'X', or '2'.
+    pub fn graph_scale_exponent(&self, axis: char) -> i8 {
+        let opts = &self.wb().current_graph.options;
+        let s = match axis {
+            'Y' | 'y' => &opts.scale_y,
+            'X' | 'x' => &opts.scale_x,
+            '2' => &opts.scale_2y,
+            _ => return 0,
+        };
+        s.exponent
+    }
+
     /// Read accessor for `/Graph Options Scale {axis} Width`. 0
     /// means auto. `axis` is 'Y', 'X', or '2'.
     pub fn graph_scale_width(&self, axis: char) -> u8 {
@@ -3799,6 +3835,15 @@ impl App {
             }
             Action::GraphOptionsScale2YWidth => {
                 self.start_graph_scale_width_prompt(GraphScaleAxis::TwoY)
+            }
+            Action::GraphOptionsScaleYExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::Y)
+            }
+            Action::GraphOptionsScaleXExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::X)
+            }
+            Action::GraphOptionsScale2YExponent => {
+                self.start_graph_scale_exponent_prompt(GraphScaleAxis::TwoY)
             }
             Action::GraphNameUse => self.start_graph_name_prompt(PromptNext::GraphNameUse, "Use"),
             Action::GraphNameCreate => {
@@ -8814,6 +8859,28 @@ impl App {
                 let parsed: u32 = p.buffer.parse().unwrap_or(current);
                 let clamped = parsed.clamp(1, 8192);
                 self.wb_mut().current_graph.options.skip = clamped;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::GraphOptionsScaleAxisExponent { axis } => {
+                let trimmed = p.buffer.trim();
+                let new_val: i8 = if trimmed.is_empty() {
+                    0
+                } else {
+                    match trimmed.parse::<i32>() {
+                        Ok(v) => v.clamp(-19, 19) as i8,
+                        Err(_) => {
+                            self.mode = Mode::Ready;
+                            return;
+                        }
+                    }
+                };
+                let opts = &mut self.wb_mut().current_graph.options;
+                let target = match axis {
+                    GraphScaleAxis::Y => &mut opts.scale_y,
+                    GraphScaleAxis::X => &mut opts.scale_x,
+                    GraphScaleAxis::TwoY => &mut opts.scale_2y,
+                };
+                target.exponent = new_val;
                 self.mode = Mode::Ready;
             }
             PromptNext::GraphOptionsScaleAxisWidth { axis } => {

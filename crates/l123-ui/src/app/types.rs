@@ -1386,6 +1386,12 @@ pub(super) enum PromptNext {
     GraphOptionsScaleAxisWidth {
         axis: GraphScaleAxis,
     },
+    /// `/Graph Options Scale {axis} Exponent` — signed numeric
+    /// prompt for the order-of-magnitude shift. Commit clamps to
+    /// `-19..=19` per Reference p. 2-204.
+    GraphOptionsScaleAxisExponent {
+        axis: GraphScaleAxis,
+    },
     /// `/Graph Name Use` — text prompt; commit replaces
     /// `current_graph` with the matching entry from `Workbook::graphs`.
     /// Unknown names are no-ops.
@@ -1591,6 +1597,10 @@ impl PromptNext {
             }
             // Scale Width is a small unsigned integer.
             PromptNext::GraphOptionsScaleAxisWidth { .. } => c.is_ascii_digit(),
+            // Scale Exponent takes a signed integer.
+            PromptNext::GraphOptionsScaleAxisExponent { .. } => {
+                c.is_ascii_digit() || c == '-'
+            }
         }
     }
 }

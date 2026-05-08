@@ -723,6 +723,11 @@ pub enum Action {
     GraphOptionsScaleYWidth,
     GraphOptionsScaleXWidth,
     GraphOptionsScale2YWidth,
+    /// `/Graph Options Scale {axis} Exponent` — signed numeric
+    /// prompt clamped -19..=19. 0 means "auto".
+    GraphOptionsScaleYExponent,
+    GraphOptionsScaleXExponent,
+    GraphOptionsScale2YExponent,
     /// `/Graph Options Scale Skip` — numeric prompt; commit sets
     /// `current_graph.options.skip` to the new value (clamped 1..=8192).
     GraphOptionsScaleSkip,
@@ -4341,7 +4346,7 @@ const GO_ADVANCED_MENU: &[MenuItem] = &[
 // `width` fields.
 macro_rules! gos_axis_menu {
     ($auto:expr, $manual:expr, $lower:expr, $upper:expr, $format:literal,
-     $indicator:literal, $type_menu:expr, $exponent:literal, $width:expr) => {
+     $indicator:literal, $type_menu:expr, $exponent:expr, $width:expr) => {
         &[
             MenuItem {
                 letter: 'A',
@@ -4397,7 +4402,7 @@ macro_rules! gos_axis_menu {
                 name: "Exponent",
                 help: "Order-of-magnitude shift",
                 help_page: "0095-graph-options-scale-y-scale-x-scale-2y-scale-exponent.html",
-                body: MenuBody::NotImplemented($exponent),
+                body: MenuBody::Action($exponent),
             },
             MenuItem {
                 letter: 'W',
@@ -4477,7 +4482,7 @@ const GO_SCALE_Y_MENU: &[MenuItem] = gos_axis_menu!(
     "gosy-format",
     "gosy-indicator",
     GO_SCALE_Y_TYPE_MENU,
-    "gosy-exponent",
+    Action::GraphOptionsScaleYExponent,
     Action::GraphOptionsScaleYWidth
 );
 const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
@@ -4488,7 +4493,7 @@ const GO_SCALE_X_MENU: &[MenuItem] = gos_axis_menu!(
     "gosx-format",
     "gosx-indicator",
     GO_SCALE_X_TYPE_MENU,
-    "gosx-exponent",
+    Action::GraphOptionsScaleXExponent,
     Action::GraphOptionsScaleXWidth
 );
 const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
@@ -4499,7 +4504,7 @@ const GO_SCALE_2Y_MENU: &[MenuItem] = gos_axis_menu!(
     "gos2-format",
     "gos2-indicator",
     GO_SCALE_2Y_TYPE_MENU,
-    "gos2-exponent",
+    Action::GraphOptionsScale2YExponent,
     Action::GraphOptionsScale2YWidth
 );
 

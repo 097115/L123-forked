@@ -608,6 +608,26 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_SCALE_EXPONENT Y 3" — axis token (Y, X,
+            // or 2) and expected order-of-magnitude shift.
+            "ASSERT_GRAPH_SCALE_EXPONENT" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("");
+                let want: i8 = want_raw.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_SCALE_EXPONENT expects an integer, got {want_raw:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_scale_exponent(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale exponent {axis_ch} expected {want} got {got}",
+                    path.display()
+                );
+            }
             // "ASSERT_GRAPH_SCALE_WIDTH Y 8" — axis token (Y, X, or
             // 2) and expected scale-label max width.
             "ASSERT_GRAPH_SCALE_WIDTH" => {
@@ -1381,6 +1401,7 @@ transcripts! {
     graph_options_grid_y_axis => "graph_options_grid_y_axis.tsv",
     graph_options_scale_type => "graph_options_scale_type.tsv",
     graph_options_scale_width => "graph_options_scale_width.tsv",
+    graph_options_scale_exponent => "graph_options_scale_exponent.tsv",
     graph_render_data_labels => "graph_render_data_labels.tsv",
     graph_render_data_labels_bar => "graph_render_data_labels_bar.tsv",
     graph_render_data_labels_stack => "graph_render_data_labels_stack.tsv",
