@@ -56,6 +56,32 @@ pub fn render_png(def: &GraphDef, vals: &GraphValues) -> Vec<u8> {
 }
 
 pub fn render_png_sized(def: &GraphDef, vals: &GraphValues, w: u32, h: u32) -> Vec<u8> {
+    let img = match render_dynamic_image_sized(def, vals, w, h) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut out = Cursor::new(Vec::new());
+    match img.write_to(&mut out, image::ImageFormat::Png) {
+        Ok(_) => out.into_inner(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Render the graph straight to a [`image::DynamicImage`], skipping
+/// the PNG encode/decode round-trip. The graph view feeds this
+/// directly to ratatui-image's Picker so the image is sized to the
+/// terminal at render time. Returns `None` only when `w`/`h` is zero
+/// or `RgbImage::from_raw` rejects the buffer (the buffer is sized
+/// to match `(w, h)`, so this is a degenerate-input guard).
+pub fn render_dynamic_image_sized(
+    def: &GraphDef,
+    vals: &GraphValues,
+    w: u32,
+    h: u32,
+) -> Option<image::DynamicImage> {
+    if w == 0 || h == 0 {
+        return None;
+    }
     let pixels = (w as usize) * (h as usize) * 3;
     let mut rgb = vec![0u8; pixels];
     {
@@ -66,15 +92,7 @@ pub fn render_png_sized(def: &GraphDef, vals: &GraphValues, w: u32, h: u32) -> V
         }
         let _ = root.present();
     }
-    let img = match image::RgbImage::from_raw(w, h, rgb) {
-        Some(i) => i,
-        None => return Vec::new(),
-    };
-    let mut out = Cursor::new(Vec::new());
-    match img.write_to(&mut out, image::ImageFormat::Png) {
-        Ok(_) => out.into_inner(),
-        Err(_) => Vec::new(),
-    }
+    image::RgbImage::from_raw(w, h, rgb).map(image::DynamicImage::ImageRgb8)
 }
 
 fn draw_graph<DB>(
@@ -100,6 +118,25 @@ where
         GraphType::HLCO => draw_hlco(def, vals, root),
         GraphType::Mixed => draw_mixed(def, vals, root),
     }
+}
+
+/// Caption font size in points, scaled to the image height so the
+/// title looks proportional whether plotters is rasterizing at
+/// 800x600 or at a wide terminal's pixel size. The 1/15 ratio puts
+/// the title at roughly the band 1-2-3 R3.4a's VGA mode-12h title
+/// occupied (~6-7% of the plot height); floored at 18pt so small
+/// thumbnails stay legible.
+fn caption_font_size(root_height: u32) -> u32 {
+    (root_height / 15).max(18)
+}
+
+/// Wedge label font size for pie charts, scaled to image height.
+/// Roughly half the title size so labels read as secondary text;
+/// floored at 14pt for legibility on small renders. The label band
+/// carries both the percentage (in parens) and the category name
+/// outside the wedge — see `draw_pie`.
+fn wedge_label_font_size(root_height: u32) -> u32 {
+    (root_height / 28).max(14)
 }
 
 /// Top caption for the chart, derived from First / Second titles.
@@ -129,8 +166,10 @@ where
     Ok(())
 }
 
-/// Series colours A..F. Cycles if more series somehow appear.
-const SERIES_PALETTE: &[RGBColor] = &[BLUE, RED, GREEN, MAGENTA, CYAN, BLACK];
+/// Series colours A..F. Eyeball-matched to the 1-2-3 R3.4a graph
+/// view in DOS VGA mode 12h: A=red, B=green, C=blue, D=yellow,
+/// E=magenta, F=cyan. Cycles if more series somehow appear.
+const SERIES_PALETTE: &[RGBColor] = &[RED, GREEN, BLUE, YELLOW, MAGENTA, CYAN];
 
 fn axis_bounds(series: &[&[f64]]) -> (f64, f64) {
     let mut lo = f64::INFINITY;
@@ -194,7 +233,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     let mut chart =
         builder.build_cartesian_2d(0f64..(n.saturating_sub(1).max(1) as f64), y_lo..y_hi)?;
@@ -329,7 +368,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     match def.features.orientation {
         crate::Orientation::Vertical => {
@@ -484,7 +523,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     let mut chart = builder.build_cartesian_2d(x_lo..x_hi, y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
@@ -589,7 +628,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     let mut chart =
         builder.build_cartesian_2d((0..n as i32).into_segmented(), 0f64..(y_max * 1.05))?;
@@ -716,22 +755,52 @@ where
     }
     // Pie charts have no Cartesian axes, so x_desc/y_desc don't apply;
     // the caption is drawn directly via root.draw_text instead.
+    // Centered horizontally — `ChartBuilder::caption` does this for
+    // the other graph types automatically; pies don't go through a
+    // builder so we anchor middle/top by hand to match.
     let (w, h) = root.dim_in_pixel();
     if let Some(caption) = caption_string(def) {
+        use plotters::style::text_anchor::{HPos, Pos, VPos};
+        let font_size = caption_font_size(h);
+        let title_pos = Pos::new(HPos::Center, VPos::Top);
         root.draw_text(
             &caption,
-            &TextStyle::from(("sans-serif", 24).into_font()).color(&BLACK),
-            (10, 10),
+            &TextStyle::from(("sans-serif", font_size).into_font())
+                .color(&BLACK)
+                .pos(title_pos),
+            ((w / 2) as i32, (h / 40) as i32),
         )?;
     }
     let cx = (w / 2) as i32;
     let cy = (h / 2) as i32;
-    let radius = (w.min(h) as f64 * 0.4).max(20.0);
+    // Slightly smaller than the half-the-frame circle plotters draws
+    // by default — leaves an air gap between the wedge edge and the
+    // outside-the-pie label band that 1-2-3 R3.4a's PIC viewer used.
+    let radius = (w.min(h) as f64 * 0.32).max(20.0);
     let positive: Vec<f64> = pairs.iter().map(|(_, v)| *v).collect();
+    let total: f64 = positive.iter().sum();
+    // 1-2-3 R3.4a renders pie wedge labels as `(P.P%)  <label>`
+    // outside the wedge in a single band. Plotters' Pie widget
+    // defaults to "label outside, percent inside in white"; folding
+    // the percent into the label string and skipping the
+    // `pie.percentages(...)` call keeps everything together
+    // outside.
     let labels: Vec<String> = pairs
         .iter()
         .enumerate()
-        .map(|(wedge_i, (orig_i, _))| wedge_label(vals.x_labels.as_deref(), *orig_i, wedge_i))
+        .map(|(wedge_i, (orig_i, value))| {
+            let raw = wedge_label(vals.x_labels.as_deref(), *orig_i, wedge_i);
+            let pct = if total > 0.0 {
+                value / total * 100.0
+            } else {
+                0.0
+            };
+            if raw.is_empty() {
+                format!("({pct:.1}%)")
+            } else {
+                format!("({pct:.1}%)  {raw}")
+            }
+        })
         .collect();
     let colors: Vec<RGBColor> = positive
         .iter()
@@ -740,8 +809,17 @@ where
         .collect();
     let center = (cx, cy);
     let mut pie = Pie::new(&center, &radius, &positive, &colors, &labels);
-    pie.label_style(("sans-serif", 18).into_font().color(&BLACK));
-    pie.percentages(("sans-serif", 14).into_font().color(&WHITE));
+    pie.label_style(
+        ("sans-serif", wedge_label_font_size(h))
+            .into_font()
+            .color(&BLACK),
+    );
+    // Plotters' default label offset is 5% of the radius — just
+    // enough that a short label like "Foo" clears the wedge edge
+    // but tight enough that "(P.P%)  Salary"-style labels still
+    // brush the perimeter. Bumping to 10% gives every label a
+    // visible air gap regardless of which quadrant it lands in.
+    pie.label_offset(radius * 0.1);
     root.draw(&pie)?;
     Ok(())
 }
@@ -792,7 +870,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     let mut chart = builder.build_cartesian_2d(0f64..(n.max(1) as f64), y_lo..y_hi)?;
     let mut mesh = chart.configure_mesh();
@@ -926,7 +1004,7 @@ where
         .x_label_area_size(30)
         .y_label_area_size(40);
     if let Some(c) = caption_string(def) {
-        builder.caption(c, ("sans-serif", 24));
+        builder.caption(c, ("sans-serif", caption_font_size(root.dim_in_pixel().1)));
     }
     let mut chart =
         builder.build_cartesian_2d((0..n as i32).into_segmented(), y_lo..y_hi)?;
@@ -1113,6 +1191,31 @@ mod tests {
     }
 
     #[test]
+    fn svg_pie_slice_colors_match_lotus_palette() {
+        // 1-2-3 R3.4a assigned slice colors from a fixed palette in
+        // series-A order. Eyeball-matched from the reference
+        // screenshot in docs/SPEC: A=red, B=green, C=blue, D=yellow,
+        // E=magenta, F=cyan. Plotters emits each slice's fill via the
+        // `<polygon ... fill="#RRGGBB"` SVG attribute.
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let svg = render_svg(&def, &a(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]));
+        let expected = [
+            "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF",
+        ];
+        for color in expected {
+            let needle = format!("fill=\"{color}\"");
+            assert!(
+                svg.contains(&needle),
+                "pie SVG should contain a {color} slice; got: {}",
+                &svg[..svg.len().min(400)]
+            );
+        }
+    }
+
+    #[test]
     fn svg_pie_uses_x_labels_for_wedges() {
         let def = GraphDef {
             graph_type: GraphType::Pie,
@@ -1195,6 +1298,166 @@ mod tests {
         let img = image::load_from_memory(&bytes).expect("valid PNG");
         assert_eq!(img.width(), DEFAULT_WIDTH);
         assert_eq!(img.height(), DEFAULT_HEIGHT);
+    }
+
+    /// Locate the SVG `<text>` element that contains `needle`. Returns
+    /// the substring spanning the open tag and its inner content so
+    /// callers can assert on attributes (`text-anchor`, `x`, `y`,
+    /// `font-size`).
+    fn extract_text_element<'a>(svg: &'a str, needle: &str) -> &'a str {
+        let i = svg.find(needle).expect("needle not found in svg");
+        let start = svg[..i].rfind("<text").expect("no opening <text");
+        let end = svg[i..]
+            .find("</text>")
+            .map(|e| i + e + "</text>".len())
+            .expect("no </text>");
+        &svg[start..end]
+    }
+
+    fn parse_attr_f64(elem: &str, name: &str) -> Option<f64> {
+        let needle = format!("{name}=\"");
+        let i = elem.find(&needle)? + needle.len();
+        let rest = &elem[i..];
+        let end = rest.find('"')?;
+        rest[..end].parse().ok()
+    }
+
+    #[test]
+    fn svg_pie_label_carries_percentage_outside_the_wedge() {
+        // 1-2-3 R3.4a renders each pie wedge label with its share
+        // percentage in parens alongside the label, OUTSIDE the
+        // wedge. Plotters' default puts the percentage inside the
+        // wedge in white; we override by folding the percent into
+        // the wedge label and not calling `pie.percentages(...)`.
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let mut vals = a(vec![10.0, 20.0, 30.0]);
+        vals.x_labels = Some(vec!["Apples".into(), "Pears".into(), "Plums".into()]);
+        let svg = render_svg_sized(&def, &vals, 800, 600);
+        // Plums is the largest slice (50%) — its label text should
+        // include "50.0%". The text element must be black-filled
+        // (outside-the-wedge color), not white (inside).
+        let elem = extract_text_element(&svg, "Plums");
+        assert!(
+            elem.contains("50.0%"),
+            "Plums wedge label should embed its percentage, got: {elem}"
+        );
+        assert!(
+            elem.contains("fill=\"#000000\""),
+            "Plums wedge label should be black-filled (outside the wedge), got: {elem}"
+        );
+        // No standalone inside-wedge percentage text element should
+        // remain — those used to be white-filled `<text>` elements.
+        assert!(
+            !svg.contains("fill=\"#FFFFFF\">\n50.0%"),
+            "stale inside-wedge percentage element still present"
+        );
+    }
+
+    #[test]
+    fn svg_pie_wedge_label_font_scales_with_image_height() {
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let mut vals = a(vec![10.0, 20.0, 30.0]);
+        vals.x_labels = Some(vec!["WEDGE_A".into(), "WEDGE_B".into(), "WEDGE_C".into()]);
+        let small = render_svg_sized(&def, &vals, 800, 600);
+        let large = render_svg_sized(&def, &vals, 1600, 1200);
+        let small_size = parse_attr_f64(extract_text_element(&small, "WEDGE_A"), "font-size")
+            .expect("small svg missing wedge font-size");
+        let large_size = parse_attr_f64(extract_text_element(&large, "WEDGE_A"), "font-size")
+            .expect("large svg missing wedge font-size");
+        assert!(
+            large_size > small_size * 1.5,
+            "wedge label font should scale with image height: small={small_size}, large={large_size}"
+        );
+        assert!(
+            small_size > 14.5,
+            "wedge label font at 800x600 should be larger than the prior 18pt baseline (~14.5 SVG units), got {small_size}"
+        );
+    }
+
+    #[test]
+    fn svg_pie_title_is_horizontally_centered() {
+        let mut def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        def.options.titles.first = Some("CENTERED PIE TITLE".into());
+        let svg = render_svg_sized(&def, &a(vec![10.0, 20.0, 30.0]), 800, 600);
+        let elem = extract_text_element(&svg, "CENTERED PIE TITLE");
+        assert!(
+            elem.contains("text-anchor=\"middle\""),
+            "pie title element should be middle-anchored, got: {elem}"
+        );
+        let x = parse_attr_f64(elem, "x").expect("title element missing x");
+        assert!(
+            (x - 400.0).abs() < 5.0,
+            "pie title x should be near canvas center 400, got {x}"
+        );
+    }
+
+    #[test]
+    fn svg_title_font_size_scales_with_image_height() {
+        let mut def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        def.options.titles.first = Some("SCALABLE TITLE".into());
+        let small = render_svg_sized(&def, &a(vec![1.0, 2.0, 3.0]), 800, 600);
+        let large = render_svg_sized(&def, &a(vec![1.0, 2.0, 3.0]), 1600, 1200);
+        let small_size = parse_attr_f64(extract_text_element(&small, "SCALABLE TITLE"), "font-size")
+            .expect("small svg missing title font-size");
+        let large_size = parse_attr_f64(extract_text_element(&large, "SCALABLE TITLE"), "font-size")
+            .expect("large svg missing title font-size");
+        assert!(
+            large_size > small_size * 1.5,
+            "title font should scale with image height: small={small_size}, large={large_size}"
+        );
+    }
+
+    #[test]
+    fn svg_pie_title_font_size_scales_with_image_height() {
+        let mut def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        def.options.titles.first = Some("PIE SCALE TITLE".into());
+        let small = render_svg_sized(&def, &a(vec![10.0, 20.0, 30.0]), 800, 600);
+        let large = render_svg_sized(&def, &a(vec![10.0, 20.0, 30.0]), 1600, 1200);
+        let small_size = parse_attr_f64(extract_text_element(&small, "PIE SCALE TITLE"), "font-size")
+            .expect("small svg missing title font-size");
+        let large_size = parse_attr_f64(extract_text_element(&large, "PIE SCALE TITLE"), "font-size")
+            .expect("large svg missing title font-size");
+        assert!(
+            large_size > small_size * 1.5,
+            "pie title font should scale with image height: small={small_size}, large={large_size}"
+        );
+    }
+
+    #[test]
+    fn dynamic_image_sized_returns_image_at_requested_dims() {
+        let def = GraphDef {
+            graph_type: GraphType::Pie,
+            ..Default::default()
+        };
+        let img = render_dynamic_image_sized(&def, &a(vec![10.0, 20.0, 30.0]), 1280, 720)
+            .expect("valid image");
+        assert_eq!(img.width(), 1280);
+        assert_eq!(img.height(), 720);
+    }
+
+    #[test]
+    fn dynamic_image_sized_rejects_zero_dims() {
+        let def = GraphDef {
+            graph_type: GraphType::Bar,
+            ..Default::default()
+        };
+        assert!(render_dynamic_image_sized(&def, &a(vec![1.0]), 0, 100).is_none());
+        assert!(render_dynamic_image_sized(&def, &a(vec![1.0]), 100, 0).is_none());
     }
 
     #[test]
@@ -1563,7 +1826,7 @@ mod tests {
         let v_svg = render_svg(&v_def, &vals);
         let h_svg = render_svg(&h_def, &vals);
 
-        // Pull every bar-coloured rect (#0000FF fill from
+        // Pull every bar-coloured rect (#FF0000 fill from
         // SERIES_PALETTE[0]) and find the LARGEST one in each SVG.
         // Plotters emits the rect attrs as `x=".." y=".." width="N"
         // height="N"`. The largest such rect is the tallest bar in
@@ -1572,7 +1835,7 @@ mod tests {
         fn largest_bar_dims(svg: &str) -> Option<(u32, u32)> {
             let mut best: Option<(u32, u32, u32)> = None;
             for piece in svg.split("<rect ").skip(1) {
-                if !piece.contains("fill=\"#0000FF\"") {
+                if !piece.contains("fill=\"#FF0000\"") {
                     continue;
                 }
                 let pull = |name: &str| -> Option<u32> {
@@ -1593,9 +1856,9 @@ mod tests {
         }
 
         let (v_w, v_h) =
-            largest_bar_dims(&v_svg).expect("vertical SVG missing #0000FF bar rect");
+            largest_bar_dims(&v_svg).expect("vertical SVG missing #FF0000 bar rect");
         let (h_w, h_h) =
-            largest_bar_dims(&h_svg).expect("horizontal SVG missing #0000FF bar rect");
+            largest_bar_dims(&h_svg).expect("horizontal SVG missing #FF0000 bar rect");
         assert!(
             v_h > v_w * 2,
             "vertical bar should be much taller than wide; got {v_w}x{v_h}"
