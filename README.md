@@ -16,7 +16,7 @@ Its interaction model targets **Lotus 1-2-3 Release 3.4a for DOS**
 
 ## ✦ Status
 
-Currently `v1.2.0`, with all MVP milestones (M0–M10) shipped.
+Currently `v1.2.1`, with all MVP milestones (M0–M10) shipped.
 Tracking the milestone plan in [`docs/PLAN.md`](docs/PLAN.md):
 
 | Milestone | Scope | State |
