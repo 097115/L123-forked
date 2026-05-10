@@ -1,0 +1,102 @@
+# /Graph Options Data-Labels — render label text in the F10 XY
+# scatter view at the chosen placement.
+#
+# Slice F (data labels render — XY) of GRAPH_PLAN.md. Each • dot
+# in the scatter gets the matching A-slot data-label cell text
+# painted at the placement offset relative to the dot.
+# Reference p. 2-217.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 2, 3, 4 (X coords).
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# Seed B1..B4 = 10, 20, 30, 40 (A coords / Y values).
+RIGHT
+KEYS 10
+DOWN
+KEYS 20
+DOWN
+KEYS 30
+DOWN
+KEYS 40
+DOWN
+HOME
+
+# Seed C1..C4 = Q1..Q4 (label text).
+RIGHT
+RIGHT
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+KEYS Q4
+DOWN
+HOME
+
+# /GTX — XY graph type.
+KEY /
+KEY G
+KEY T
+KEY X
+
+# /GX over A1..A4 — independent axis values.
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GA over B1..B4 — Y values.
+RIGHT
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GOD A over C1..C4 with placement Above.
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY O
+KEY D
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+KEY A
+ASSERT_MODE          READY
+ASSERT_GRAPH_DATA_LABELS  A          A:C1..A:C4
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Above
+
+# F10 — labels render alongside the scatter. The fourth dot's
+# Y value is the max, putting its dot at the top edge of the plot;
+# its Above-placed label is suppressed by `paint_data_label`.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN        •
+ASSERT_SCREEN        Q1
+ASSERT_SCREEN        Q2
+ASSERT_SCREEN        Q3
+
+ESC
+ASSERT_MODE          READY

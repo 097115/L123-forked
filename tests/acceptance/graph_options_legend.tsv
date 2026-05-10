@@ -1,0 +1,58 @@
+# /Graph Options Legend — slice D Legend (A-F portion).
+#
+# Per Reference p. 2-200, 0091-graph-options-legend.html:
+#   /GOL {A-F}    → text prompt; commit replaces options.legend[slot]
+#   /GOL Range    → range pointer (deferred to slice F)
+#
+# Legends appear below the graph in F10 view; the settings panel does
+# not display them, so verification is via ASSERT_GRAPH_LEGEND.
+
+SIZE 80 30
+
+# Default: every legend unset.
+ASSERT_GRAPH_LEGEND  A  none
+ASSERT_GRAPH_LEGEND  F  none
+
+# /GOLA — set A's legend.
+KEY /
+KEY G
+KEY O
+KEY L
+KEY A
+KEYS Net Sales
+ENTER
+ASSERT_MODE          READY
+ASSERT_GRAPH_LEGEND  A  Net Sales
+ASSERT_GRAPH_LEGEND  B  none
+
+# /GOLF — set F's legend.
+KEY /
+KEY G
+KEY O
+KEY L
+KEY F
+KEYS YTD
+ENTER
+ASSERT_GRAPH_LEGEND  F  YTD
+ASSERT_GRAPH_LEGEND  A  Net Sales
+
+# Re-enter A's prompt: prefill is "Net Sales" (9 chars). Backspace
+# all of it and Enter to clear.
+KEY /
+KEY G
+KEY O
+KEY L
+KEY A
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+BACKSPACE
+ENTER
+ASSERT_GRAPH_LEGEND  A  none
+
+ASSERT_MODE          READY

@@ -1,0 +1,79 @@
+# /Graph Options Scale — slice D4 of GRAPH_PLAN.md (Auto/Manual + Skip).
+#
+# Per Reference p. 2-204 → 2-214, 0092-graph-options-scale.html.
+#   /GOS Y-Scale | X-Scale | 2Y-Scale → axis settings:
+#       Automatic | Manual | Lower | Upper | Format | Indicator |
+#       Type | Exponent | Width | Quit
+#   /GOS Skip → numeric prompt (every Nth x-axis label drawn)
+#
+# This slice wires only what the data model carries today: per-axis
+# Auto/Manual mode, and the Skip count. The rest (Lower/Upper/Format/
+# Indicator/Type/Exponent/Width) sit as NotImplemented stubs.
+
+SIZE 80 30
+
+# Defaults: Automatic on every axis, skip = 1.
+ASSERT_GRAPH_SCALE_MODE  Y   AUTO
+ASSERT_GRAPH_SCALE_MODE  X   AUTO
+ASSERT_GRAPH_SCALE_MODE  2Y  AUTO
+ASSERT_GRAPH_SCALE_SKIP  1
+
+# /GOSYM — Y-Scale Manual.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY M
+ASSERT_MODE              READY
+ASSERT_GRAPH_SCALE_MODE  Y   MANUAL
+ASSERT_GRAPH_SCALE_MODE  X   AUTO
+
+# /GOSXM — X-Scale Manual.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY M
+ASSERT_GRAPH_SCALE_MODE  X   MANUAL
+
+# /GOS2M — 2Y-Scale Manual.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY M
+ASSERT_GRAPH_SCALE_MODE  2Y  MANUAL
+
+# /GOSYA — Y-Scale Automatic again.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY A
+ASSERT_GRAPH_SCALE_MODE  Y   AUTO
+
+# /GOSS5 — Skip every 5th label.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY S
+KEYS 5
+ENTER
+ASSERT_MODE              READY
+ASSERT_GRAPH_SCALE_SKIP  5
+
+# /GOSS — empty input keeps the previous skip (5).
+KEY /
+KEY G
+KEY O
+KEY S
+KEY S
+ENTER
+ASSERT_GRAPH_SCALE_SKIP  5
+
+ASSERT_MODE              READY

@@ -1,0 +1,80 @@
+# /Graph Group — slice E2 of GRAPH_PLAN.md.
+#
+# Per Reference p. 2-172 (0070-graph-group.html):
+#   /GG → POINT prompt for the group range
+#         → Columnwise | Rowwise submenu
+#   Columnwise: first column → X; succeeding columns → A, B, … F.
+#   Rowwise:    first row    → X; succeeding rows    → A, B, … F.
+#
+# /Graph Group overrides any prior /Graph X or /Graph A-F
+# assignments. Up to seven columns (or rows) get used; extras and
+# unfilled slots stay cleared.
+
+SIZE 80 30
+HOME
+
+# /GG enters POINT for the group range.
+KEY /
+KEY G
+KEY G
+ASSERT_MODE          POINT
+ASSERT_PANEL_L3      Enter graph group range
+
+# Pointer at A1 — extend to D4 (4 cols × 4 rows).
+DOWN
+DOWN
+DOWN
+RIGHT
+RIGHT
+RIGHT
+ENTER
+ASSERT_MODE          MENU
+ASSERT_PANEL_L2      Columnwise
+ASSERT_PANEL_L2      Rowwise
+
+# Columnwise: first col → X, second → A, third → B, fourth → C.
+KEY C
+ASSERT_MODE          READY
+ASSERT_GRAPH_SERIES  X  A:A1..A:A4
+ASSERT_GRAPH_SERIES  A  A:B1..A:B4
+ASSERT_GRAPH_SERIES  B  A:C1..A:C4
+ASSERT_GRAPH_SERIES  C  A:D1..A:D4
+ASSERT_GRAPH_SERIES  D  none
+ASSERT_GRAPH_SERIES  E  none
+ASSERT_GRAPH_SERIES  F  none
+
+# Now Rowwise on the same A1..D4 block.
+HOME
+KEY /
+KEY G
+KEY G
+DOWN
+DOWN
+DOWN
+RIGHT
+RIGHT
+RIGHT
+ENTER
+ASSERT_MODE          MENU
+KEY R
+ASSERT_MODE          READY
+ASSERT_GRAPH_SERIES  X  A:A1..A:D1
+ASSERT_GRAPH_SERIES  A  A:A2..A:D2
+ASSERT_GRAPH_SERIES  B  A:A3..A:D3
+ASSERT_GRAPH_SERIES  C  A:A4..A:D4
+ASSERT_GRAPH_SERIES  D  none
+
+# Esc from the orient submenu cancels the group operation,
+# leaving prior assignments in place.
+HOME
+KEY /
+KEY G
+KEY G
+DOWN
+RIGHT
+ENTER
+ASSERT_MODE          MENU
+ESC
+ASSERT_MODE          READY
+ASSERT_GRAPH_SERIES  X  A:A1..A:D1
+ASSERT_GRAPH_SERIES  A  A:A2..A:D2

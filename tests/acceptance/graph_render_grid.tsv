@@ -1,0 +1,81 @@
+# /Graph F10 view — Grid lines render per options.grid mask.
+#
+# Slice F4 of GRAPH_PLAN.md. The F10 unicode renderer draws light
+# dotted grid lines:
+#   `┄` (U+2504) horizontal lines when options.grid.horizontal
+#   `┊` (U+250A) vertical lines  when options.grid.vertical
+# Default state has both off, so no grid characters appear.
+
+SIZE 80 30
+
+# Seed A1..A5 = 1..5 and pick Bar.
+KEYS 1
+ENTER
+KEYS 2
+ENTER
+KEYS 3
+ENTER
+KEYS 4
+ENTER
+KEYS 5
+ENTER
+HOME
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+DOWN
+ENTER
+
+# Default: no grid characters in F10.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  ┄
+ASSERT_SCREEN_NOT_CONTAINS  ┊
+ESC
+
+# /GOGH — horizontal grid lines only.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY H
+ASSERT_GRAPH_GRID  h
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     ┄
+ASSERT_SCREEN_NOT_CONTAINS  ┊
+ESC
+
+# /GOGB — both directions.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY B
+ASSERT_GRAPH_GRID  hv
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     ┄
+ASSERT_SCREEN     ┊
+ESC
+
+# /GOGC — clear; no grid characters again.
+KEY /
+KEY G
+KEY O
+KEY G
+KEY C
+ASSERT_GRAPH_GRID  none
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  ┄
+ASSERT_SCREEN_NOT_CONTAINS  ┊
+ESC
+ASSERT_MODE       READY

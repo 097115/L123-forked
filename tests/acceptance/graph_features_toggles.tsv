@@ -1,0 +1,137 @@
+# /Graph Type Features — boolean toggles (slice C1 of GRAPH_PLAN.md).
+#
+# Six features wired:
+#   Vertical / Horizontal (orientation, two leaves; default Vertical)
+#   Stacked   Yes / No     (default No)
+#   100%      Yes / No     (default No)
+#   Drop-Shadow Yes / No   (default No)
+#   3-D       Yes / No     (default No)
+#   Table     Yes / No     (default No)
+#
+# Each leaf, when selected, closes the menu back to READY and the next
+# `/G` shows the panel reflecting the new state.
+# Reference: R3.1 Reference pp. 2-194 → 2-198.
+
+SIZE 80 30
+
+# Default state: Vertical on, every flag off.
+KEY /
+KEY G
+ASSERT_SCREEN  x Vertical
+ASSERT_SCREEN    Stack data ranges
+ASSERT_SCREEN    Percentage
+ASSERT_SCREEN    Drop-shadow
+ASSERT_SCREEN    3-D
+ASSERT_SCREEN    Table
+ESC
+ESC
+ASSERT_MODE    READY
+
+# /GTFH — orientation Horizontal.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY H
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  x Horizontal
+ASSERT_SCREEN    Vertical
+ESC
+ESC
+
+# /GTFV — back to Vertical.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY V
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  x Vertical
+ESC
+ESC
+
+# /GTFSY — Stacked Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY S
+KEY Y
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN  x Stack data ranges
+ESC
+ESC
+
+# /GTFSN — Stacked No.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY S
+KEY N
+ASSERT_MODE    READY
+KEY /
+KEY G
+ASSERT_SCREEN_NOT_CONTAINS  x Stack data ranges
+ESC
+ESC
+
+# /GTF1Y — 100% (percentage) Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY 1
+KEY Y
+KEY /
+KEY G
+ASSERT_SCREEN  x Percentage
+ESC
+ESC
+
+# /GTFDY — Drop-Shadow Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY D
+KEY Y
+KEY /
+KEY G
+ASSERT_SCREEN  x Drop-shadow
+ESC
+ESC
+
+# /GTF3Y — 3-D Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY 3
+KEY Y
+KEY /
+KEY G
+ASSERT_SCREEN  x 3-D
+ESC
+ESC
+
+# /GTFTY — Table Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY T
+KEY Y
+KEY /
+KEY G
+ASSERT_SCREEN  x Table
+ESC
+ESC
+
+ASSERT_MODE    READY

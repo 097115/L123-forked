@@ -18,6 +18,26 @@
 
 use l123_core::{Format, FormatKind};
 
+/// True for the `FormatKind` variants that represent a date or time
+/// rendering (D1..D9). The override pipeline only stores raw Excel
+/// format strings for these; numeric formats stay on the canonical
+/// kind path.
+pub fn is_date_or_time_kind(kind: FormatKind) -> bool {
+    use FormatKind::*;
+    matches!(
+        kind,
+        DateDmy
+            | DateDm
+            | DateMy
+            | DateLongIntl
+            | DateShortIntl
+            | TimeHmsAmPm
+            | TimeHmAmPm
+            | TimeLongIntl
+            | TimeShortIntl
+    )
+}
+
 /// Parse an Excel `num_fmt` string to an L123 `Format`.
 ///
 /// Returns `None` if the string is empty, `"general"`, or otherwise
@@ -32,6 +52,19 @@ pub fn parse(raw: &str) -> Option<Format> {
     // Excel splits positive;negative;zero;text — the positive section
     // dictates the kind. The other sections are purely cosmetic.
     let positive = trimmed.split(';').next().unwrap_or("");
+
+    // Date/time detection runs first because m/d/y/h/s glyphs do not
+    // appear in numeric formats — once we've matched a date or time,
+    // we don't fall through to the currency/scientific classifier.
+    if let Some(kind) = classify_datetime(positive) {
+        return Some(Format {
+            kind,
+            decimals: 0,
+            parens: false,
+            negative_color: None,
+        });
+    }
+
     let stripped = strip_cosmetic(positive);
     if stripped.is_empty() {
         return None;
@@ -43,12 +76,16 @@ pub fn parse(raw: &str) -> Option<Format> {
         return Some(Format {
             kind: FormatKind::Percent,
             decimals,
+            parens: false,
+            negative_color: None,
         });
     }
     if stripped.contains('E') || stripped.contains('e') {
         return Some(Format {
             kind: FormatKind::Scientific,
             decimals,
+            parens: false,
+            negative_color: None,
         });
     }
     if stripped.contains('$')
@@ -59,18 +96,24 @@ pub fn parse(raw: &str) -> Option<Format> {
         return Some(Format {
             kind: FormatKind::Currency,
             decimals,
+            parens: false,
+            negative_color: None,
         });
     }
     if stripped.contains('#') || stripped.contains(',') {
         return Some(Format {
             kind: FormatKind::Comma,
             decimals,
+            parens: false,
+            negative_color: None,
         });
     }
     if stripped.contains('0') {
         return Some(Format {
             kind: FormatKind::Fixed,
             decimals,
+            parens: false,
+            negative_color: None,
         });
     }
 
@@ -89,19 +132,21 @@ pub fn to_num_fmt(format: Format) -> String {
         FormatKind::Currency => format!("\"$\"{}", zeros_with_decimals("#,##0", d)),
         FormatKind::Comma => zeros_with_decimals("#,##0", d),
         FormatKind::Percent => format!("{}%", zeros_with_decimals("0", d)),
+        // Date / time kinds round-trip via canonical Excel format
+        // strings that classify_datetime() will recognize on re-load.
+        FormatKind::DateDmy => "dd-mmm-yy".to_string(),
+        FormatKind::DateDm => "dd-mmm".to_string(),
+        FormatKind::DateMy => "mmm-yy".to_string(),
+        FormatKind::DateLongIntl => "m/d/yy".to_string(),
+        FormatKind::DateShortIntl => "m/d".to_string(),
+        FormatKind::TimeLongIntl => "h:mm:ss".to_string(),
+        FormatKind::TimeShortIntl => "h:mm".to_string(),
+        FormatKind::TimeHmsAmPm => "h:mm:ss AM/PM".to_string(),
+        FormatKind::TimeHmAmPm => "h:mm AM/PM".to_string(),
         // Kinds we don't yet render to Excel fall back to General so the
         // cell at least opens without an error in Excel.
         FormatKind::General
         | FormatKind::PlusMinus
-        | FormatKind::DateDmy
-        | FormatKind::DateDm
-        | FormatKind::DateMy
-        | FormatKind::DateLongIntl
-        | FormatKind::DateShortIntl
-        | FormatKind::TimeHmsAmPm
-        | FormatKind::TimeHmAmPm
-        | FormatKind::TimeLongIntl
-        | FormatKind::TimeShortIntl
         | FormatKind::Text
         | FormatKind::Hidden
         | FormatKind::Automatic
@@ -121,6 +166,150 @@ fn zeros_with_decimals(integer_pattern: &str, decimals: usize) -> String {
             s.push('0');
         }
         s
+    }
+}
+
+/// Detect a date or time format by scanning unquoted `m`, `d`, `y`,
+/// `h`, `s` glyphs in the positive section.
+///
+/// 1-2-3 has five date kinds (D1..D5) and four time kinds (D6..D9).
+/// Excel's format strings carry more variation than that — we collapse:
+///
+/// * Any format containing `h` or `s` → **time**
+///   (`TimeLongIntl` if `s` is present, else `TimeShortIntl`).
+/// * Date with year + month + day:
+///   * letter month (`mmm`/`mmmm`) → `DateDmy` (D1)
+///   * numeric month → `DateLongIntl` (D4)
+/// * Date with month + day, no year:
+///   * letter month → `DateDm` (D2)
+///   * numeric month → `DateShortIntl` (D5)
+/// * Date with month + year, no day → `DateMy` (D3)
+fn classify_datetime(positive: &str) -> Option<l123_core::FormatKind> {
+    use l123_core::FormatKind;
+
+    let mut has_y = false;
+    let mut has_d = false;
+    let mut has_h = false;
+    let mut has_s = false;
+    let mut has_m = false;
+    let mut has_mmm = false;
+    let mut has_ampm = false;
+
+    let bytes = positive.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        match c {
+            // Quoted literal — skip the inner chars entirely so a
+            // literal "moon" doesn't trigger month detection.
+            '"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            // Backslash-escape consumes the next char literally.
+            '\\' => {
+                i += 2;
+            }
+            // Width-spacer / fill-repeat — drop the next char.
+            '_' | '*' => {
+                i += 2;
+            }
+            // `[Red]`, `[h]`, `[$-409]` — cosmetic / locale tags. We
+            // skip the entire bracketed run; the contents do not count
+            // as date glyphs.
+            '[' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            'm' | 'M' => {
+                let mut run = 1;
+                while i + run < bytes.len() && matches!(bytes[i + run], b'm' | b'M') {
+                    run += 1;
+                }
+                has_m = true;
+                if run >= 3 {
+                    has_mmm = true;
+                }
+                i += run;
+            }
+            'd' | 'D' => {
+                has_d = true;
+                i += 1;
+            }
+            'y' | 'Y' => {
+                has_y = true;
+                i += 1;
+            }
+            'h' | 'H' => {
+                has_h = true;
+                i += 1;
+            }
+            's' | 'S' => {
+                has_s = true;
+                i += 1;
+            }
+            // `AM/PM` (or `am/pm`) and `A/P` (or `a/p`) — literal AM/PM
+            // markers Excel uses to flag a 12-hour time format.
+            'A' | 'a' => {
+                let lower = positive[i..].to_ascii_lowercase();
+                if lower.starts_with("am/pm") {
+                    has_ampm = true;
+                    i += 5;
+                } else if lower.starts_with("a/p") {
+                    has_ampm = true;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    // Time wins over date. `[h]:mm:ss` (elapsed time) hides `h` inside
+    // brackets — `s` alone is enough to mark it as time. AM/PM marker
+    // selects the 12-hour kinds (D6/D7) over the international ones.
+    if has_h || has_s {
+        return Some(match (has_s, has_ampm) {
+            (true, true) => FormatKind::TimeHmsAmPm,
+            (false, true) => FormatKind::TimeHmAmPm,
+            (true, false) => FormatKind::TimeLongIntl,
+            (false, false) => FormatKind::TimeShortIntl,
+        });
+    }
+
+    match (has_y, has_m, has_d) {
+        (true, true, true) => Some(if has_mmm {
+            FormatKind::DateDmy
+        } else {
+            FormatKind::DateLongIntl
+        }),
+        (false, true, true) => Some(if has_mmm {
+            FormatKind::DateDm
+        } else {
+            FormatKind::DateShortIntl
+        }),
+        (true, true, false) => Some(FormatKind::DateMy),
+        // Day-only (`d`, `dd`, `ddd`, `dddd`) and year-only (`yyyy`)
+        // are valid date formats too — collapse to a sensible D-letter
+        // for the canonical-tag fallback. The actual rendering goes
+        // through the override path because `to_num_fmt(D5)` = "m/d"
+        // doesn't match the original.
+        (false, false, true) => Some(FormatKind::DateShortIntl),
+        (true, false, false) => Some(FormatKind::DateMy),
+        _ => None,
     }
 }
 
@@ -240,14 +429,18 @@ mod tests {
             parse("0.00E+00"),
             Some(Format {
                 kind: FormatKind::Scientific,
-                decimals: 2
+                decimals: 2,
+                parens: false,
+                negative_color: None,
             })
         );
         assert_eq!(
             parse("0E+00"),
             Some(Format {
                 kind: FormatKind::Scientific,
-                decimals: 0
+                decimals: 0,
+                parens: false,
+                negative_color: None,
             })
         );
     }
@@ -284,6 +477,252 @@ mod tests {
     }
 
     #[test]
+    fn date_my_for_month_year_formats() {
+        // The atlas-model.xlsx fixture uses these three forms.
+        assert_eq!(
+            parse("m/yyyy"),
+            Some(Format {
+                kind: FormatKind::DateMy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("mmm-yyyy"),
+            Some(Format {
+                kind: FormatKind::DateMy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("mmm yyyy"),
+            Some(Format {
+                kind: FormatKind::DateMy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("mmm-yy"),
+            Some(Format {
+                kind: FormatKind::DateMy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn date_dmy_for_letter_month_full_dates() {
+        assert_eq!(
+            parse("dd-mmm-yy"),
+            Some(Format {
+                kind: FormatKind::DateDmy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("d-mmm-yyyy"),
+            Some(Format {
+                kind: FormatKind::DateDmy,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn date_dm_for_letter_month_no_year() {
+        assert_eq!(
+            parse("d-mmm"),
+            Some(Format {
+                kind: FormatKind::DateDm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("dd-mmm"),
+            Some(Format {
+                kind: FormatKind::DateDm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn date_long_intl_for_numeric_full_dates() {
+        // Built-in numFmtId 14 = "m/d/yyyy"; 22 = "m/d/yyyy h:mm" (handled
+        // separately as time). All-numeric dates map to D4.
+        assert_eq!(
+            parse("m/d/yyyy"),
+            Some(Format {
+                kind: FormatKind::DateLongIntl,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("m/d/yy"),
+            Some(Format {
+                kind: FormatKind::DateLongIntl,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn date_short_intl_for_numeric_no_year() {
+        assert_eq!(
+            parse("m/d"),
+            Some(Format {
+                kind: FormatKind::DateShortIntl,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn time_long_intl_for_h_m_s() {
+        assert_eq!(
+            parse("h:mm:ss"),
+            Some(Format {
+                kind: FormatKind::TimeLongIntl,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn time_short_intl_for_h_m_no_seconds() {
+        assert_eq!(
+            parse("h:mm"),
+            Some(Format {
+                kind: FormatKind::TimeShortIntl,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn time_hms_ampm_for_h_m_s_with_ampm_marker() {
+        assert_eq!(
+            parse("h:mm:ss AM/PM"),
+            Some(Format {
+                kind: FormatKind::TimeHmsAmPm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        // Lowercase variant.
+        assert_eq!(
+            parse("h:mm:ss am/pm"),
+            Some(Format {
+                kind: FormatKind::TimeHmsAmPm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        // Single-letter A/P short form Excel also accepts.
+        assert_eq!(
+            parse("h:mm:ss A/P"),
+            Some(Format {
+                kind: FormatKind::TimeHmsAmPm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn time_hm_ampm_for_h_m_with_ampm_marker() {
+        assert_eq!(
+            parse("h:mm AM/PM"),
+            Some(Format {
+                kind: FormatKind::TimeHmAmPm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+        assert_eq!(
+            parse("h:mm am/pm"),
+            Some(Format {
+                kind: FormatKind::TimeHmAmPm,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            })
+        );
+    }
+
+    #[test]
+    fn time_ampm_round_trips_via_to_num_fmt() {
+        for kind in [FormatKind::TimeHmsAmPm, FormatKind::TimeHmAmPm] {
+            let f = Format {
+                kind,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            };
+            let s = to_num_fmt(f);
+            assert_eq!(parse(&s), Some(f), "round-trip for {f:?} via {s:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_letters_do_not_trigger_date_detection() {
+        // Quoted "m" is a literal, not a month token. Should fall through
+        // to None (or, here, to currency since the format also has $).
+        assert_eq!(parse("\"month\" 0"), Some(Format::fixed(0)));
+    }
+
+    #[test]
+    fn date_round_trips_via_to_num_fmt() {
+        for kind in [
+            FormatKind::DateDmy,
+            FormatKind::DateDm,
+            FormatKind::DateMy,
+            FormatKind::DateLongIntl,
+            FormatKind::DateShortIntl,
+            FormatKind::TimeLongIntl,
+            FormatKind::TimeShortIntl,
+        ] {
+            let f = Format {
+                kind,
+                decimals: 0,
+                parens: false,
+                negative_color: None,
+            };
+            let s = to_num_fmt(f);
+            assert_eq!(parse(&s), Some(f), "round-trip for {f:?} via {s:?}");
+        }
+    }
+
+    #[test]
     fn to_num_fmt_round_trips_common_kinds() {
         for f in [
             Format::fixed(0),
@@ -310,6 +749,8 @@ mod tests {
         let f = Format {
             kind: FormatKind::Scientific,
             decimals: 2,
+            parens: false,
+            negative_color: None,
         };
         assert_eq!(parse(&to_num_fmt(f)), Some(f));
     }

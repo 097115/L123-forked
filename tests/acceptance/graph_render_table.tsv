@@ -1,0 +1,58 @@
+# /Graph F10 view — value table renders below the chart.
+#
+# Slice F7 of GRAPH_PLAN.md. When features.table = true, the
+# unicode F10 view reserves rows just above the legend for one row
+# per populated A..F series, listing each series' values per X
+# position. Header is `A: <values>`.
+# Reference p. 2-198: "Table — Display a table of the graph values
+# below the graph."
+
+SIZE 80 30
+
+# Seed A1..A3 = 11, 22, 33 with commit-and-advance DOWN.
+KEYS 11
+DOWN
+KEYS 22
+DOWN
+KEYS 33
+DOWN
+HOME
+ASSERT_POINTER     A:A1
+
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A3
+HOME
+ASSERT_POINTER     A:A1
+
+# Default: table off. Without it, "33" only appears in cell A3 if
+# pointer is on it; with pointer at A1, the control panel shows
+# "11" but neither "22" nor "33".
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  33
+ESC
+
+# /GTFTY — Table Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY T
+KEY Y
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     22
+ASSERT_SCREEN     33
+# A row label appears at the start of the data line.
+ASSERT_SCREEN     A:
+ESC
+ASSERT_MODE       READY

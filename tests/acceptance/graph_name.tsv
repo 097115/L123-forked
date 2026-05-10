@@ -1,0 +1,92 @@
+# /Graph Name — slice E1 of GRAPH_PLAN.md.
+#
+# Per Reference p. 2-218 → 2-224 (0071-graph-name.html):
+#   Use     → text prompt; loads named graph into current_graph
+#   Create  → text prompt (≤15 chars); stores current_graph under name
+#   Delete  → text prompt; drops one named graph
+#   Reset   → immediate; clears every named graph (no confirmation,
+#             per the Reference's explicit CAUTION note)
+#   Table   → POINT for output range (deferred; NotImplemented stub)
+#
+# Verification via the new ASSERT_GRAPH_NAMES_COUNT directive plus the
+# existing ASSERT_GRAPH_TYPE for Use round-trips.
+
+SIZE 80 30
+
+# Default: no named graphs.
+ASSERT_GRAPH_NAMES_COUNT  0
+
+# /GTB then /GNCfirst — store the Bar graph as "first".
+KEY /
+KEY G
+KEY T
+KEY B
+ASSERT_GRAPH_TYPE         BAR
+KEY /
+KEY G
+KEY N
+KEY C
+KEYS first
+ENTER
+ASSERT_MODE               READY
+ASSERT_GRAPH_NAMES_COUNT  1
+
+# /GTX then /GNCsecond.
+KEY /
+KEY G
+KEY T
+KEY X
+KEY /
+KEY G
+KEY N
+KEY C
+KEYS second
+ENTER
+ASSERT_GRAPH_NAMES_COUNT  2
+ASSERT_GRAPH_TYPE         XY
+
+# /GNUfirst — current graph reverts to Bar.
+KEY /
+KEY G
+KEY N
+KEY U
+KEYS first
+ENTER
+ASSERT_MODE               READY
+ASSERT_GRAPH_TYPE         BAR
+
+# /GNDfirst — drop the named graph.
+KEY /
+KEY G
+KEY N
+KEY D
+KEYS first
+ENTER
+ASSERT_GRAPH_NAMES_COUNT  1
+
+# /GNUmissing — unknown name is a no-op (graph type unchanged).
+KEY /
+KEY G
+KEY N
+KEY U
+KEYS missing
+ENTER
+ASSERT_GRAPH_TYPE         BAR
+
+# /GNR — Reset clears every named graph immediately, no confirmation.
+KEY /
+KEY G
+KEY N
+KEY R
+ASSERT_MODE               READY
+ASSERT_GRAPH_NAMES_COUNT  0
+
+# Empty name is a no-op for Create/Delete/Use.
+KEY /
+KEY G
+KEY N
+KEY C
+ENTER
+ASSERT_GRAPH_NAMES_COUNT  0
+
+ASSERT_MODE               READY

@@ -1,0 +1,61 @@
+# /Graph Options Scale {Y|X|2Y} Width — store the maximum
+# character width for scale-axis labels.
+#
+# Slice F (scale width) of GRAPH_PLAN.md. Until this slice the
+# Width leaf was a NotImplemented stub. After: a numeric prompt
+# (0..=40 — 1-2-3 R3.4a's documented range) records `ScaleAxis::
+# width` per axis. Default 0 means "auto" — honor whatever the
+# renderer picks.
+# Reference p. 2-204, 0099-graph-options-scale-y-scale-x-scale-2y-scale-width.html.
+
+SIZE 80 30
+
+# Defaults: every axis width = 0.
+ASSERT_GRAPH_SCALE_WIDTH  Y   0
+ASSERT_GRAPH_SCALE_WIDTH  X   0
+ASSERT_GRAPH_SCALE_WIDTH  2Y  0
+
+# /GOSY W 8 — Y-Scale Width = 8.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY W
+KEYS 8
+ENTER
+ASSERT_MODE                READY
+ASSERT_GRAPH_SCALE_WIDTH   Y   8
+
+# /GOSX W 12 — X-Scale Width = 12.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY W
+KEYS 12
+ENTER
+ASSERT_GRAPH_SCALE_WIDTH   X   12
+
+# /GOS2 W 6 — 2Y-Scale Width = 6.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY W
+KEYS 6
+ENTER
+ASSERT_GRAPH_SCALE_WIDTH   2Y  6
+
+# Out-of-range input clamps to 40.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY W
+KEYS 99
+ENTER
+ASSERT_GRAPH_SCALE_WIDTH   Y   40

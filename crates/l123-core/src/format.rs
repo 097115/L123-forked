@@ -1,6 +1,7 @@
 //! Cell display formats and their parenthesized tags as shown in the
 //! control panel (e.g. `(C2)` = Currency 2dp).  See SPEC §12.
 
+use crate::color::RgbColor;
 use crate::international::{CurrencyPosition, DateIntl, International, NegativeStyle, TimeIntl};
 use std::fmt;
 
@@ -35,40 +36,82 @@ pub struct Format {
     pub kind: FormatKind,
     /// Decimal places, 0..=15. Ignored for kinds that don't use it.
     pub decimals: u8,
+    /// `/Range Format Other Parentheses Yes` wraps the rendered numeric
+    /// body in `()` regardless of sign. Independent of `kind` so it can
+    /// layer on top of Fixed/Currency/Comma/etc. Ignored for the
+    /// non-numeric kinds (General/Text/Hidden/LabelOnly/Automatic/Reset).
+    pub parens: bool,
+    /// `/Range Format Other Color Negative <color>` — when set, negative
+    /// numeric values render with this foreground color, overriding any
+    /// explicit per-cell font color. `None` means inherit normally.
+    /// Ignored for non-numeric kinds.
+    pub negative_color: Option<RgbColor>,
 }
 
 impl Format {
     pub const GENERAL: Format = Format {
         kind: FormatKind::General,
         decimals: 0,
+        parens: false,
+        negative_color: None,
     };
     pub const RESET: Format = Format {
         kind: FormatKind::Reset,
         decimals: 0,
+        parens: false,
+        negative_color: None,
     };
 
     pub fn fixed(d: u8) -> Self {
         Self {
             kind: FormatKind::Fixed,
             decimals: d.min(15),
+            parens: false,
+            negative_color: None,
         }
     }
     pub fn currency(d: u8) -> Self {
         Self {
             kind: FormatKind::Currency,
             decimals: d.min(15),
+            parens: false,
+            negative_color: None,
         }
     }
     pub fn percent(d: u8) -> Self {
         Self {
             kind: FormatKind::Percent,
             decimals: d.min(15),
+            parens: false,
+            negative_color: None,
         }
     }
     pub fn comma(d: u8) -> Self {
         Self {
             kind: FormatKind::Comma,
             decimals: d.min(15),
+            parens: false,
+            negative_color: None,
+        }
+    }
+
+    /// Return a copy of `self` with the parentheses flag turned on.
+    pub fn with_parens(self) -> Self {
+        Self {
+            parens: true,
+            ..self
+        }
+    }
+
+    /// Construct a format from `kind` with default modifiers
+    /// (`decimals: 0`, no parens, no negative-color override).
+    /// Convenience for kinds that don't carry a decimals count.
+    pub fn from_kind(kind: FormatKind) -> Self {
+        Self {
+            kind,
+            decimals: 0,
+            parens: false,
+            negative_color: None,
         }
     }
 
@@ -130,7 +173,7 @@ pub fn format_number(n: f64, format: Format, intl: &International) -> String {
     let d = format.decimals as usize;
     let dec = intl.punctuation.decimal_char();
     let thou = intl.punctuation.thousands_sep();
-    match format.kind {
+    let body = match format.kind {
         Fixed => swap_decimal(format!("{n:.d$}"), dec),
         Scientific => swap_decimal(format!("{n:.d$e}"), dec),
         Currency => {
@@ -157,13 +200,25 @@ pub fn format_number(n: f64, format: Format, intl: &International) -> String {
         DateShortIntl => format_date_intl(n, intl.date_intl, false),
         TimeLongIntl => format_time_intl(n, intl.time_intl, true),
         TimeShortIntl => format_time_intl(n, intl.time_intl, false),
-        // D1/D2/D3 (DateDmy/DateDm/DateMy) and D6/D7 (TimeHmsAmPm/
-        // HmAmPm): not yet wired. Display the underlying number until
-        // their milestones land.
-        DateDmy | DateDm | DateMy | TimeHmsAmPm | TimeHmAmPm | Text | Hidden | LabelOnly => {
-            swap_decimal(crate::contents::format_number_general(n), dec)
-        }
+        DateDmy => format_date_letter_month(n, true, true),
+        DateDm => format_date_letter_month(n, false, true),
+        DateMy => format_date_letter_month(n, true, false),
+        TimeHmsAmPm => format_time_12h(n, true),
+        TimeHmAmPm => format_time_12h(n, false),
+        Text | Hidden | LabelOnly => swap_decimal(crate::contents::format_number_general(n), dec),
+    };
+    if format.parens && parens_apply_to(format.kind) {
+        format!("({body})")
+    } else {
+        body
     }
+}
+
+/// `parens` is meaningful only for the numeric format kinds — wrapping
+/// dates/times or non-numeric tags would be visual noise.
+fn parens_apply_to(kind: FormatKind) -> bool {
+    use FormatKind::*;
+    matches!(kind, Fixed | Scientific | Currency | Comma | Percent)
 }
 
 /// Convert a Lotus serial date to (year, month, day). The serial is
@@ -228,6 +283,385 @@ fn fraction_to_hms(serial: f64) -> (u32, u32, u32) {
     (h, m, s)
 }
 
+/// Render `serial` against an Excel date/time format string,
+/// preserving the original Excel author's intent verbatim.
+///
+/// Used when an `.xlsx` cell carries a num_fmt string that doesn't
+/// round-trip exactly through the canonical 1-2-3 D1..D9 mapping
+/// (e.g. `"yyyy-mm-dd"`, `"d-mmm-yyyy"`, `"dddd"`). The override is
+/// stored on the cell at load time and re-emitted at save time, so a
+/// load → save with no edits leaves the format string untouched.
+///
+/// Recognised glyphs (case-insensitive except `AM/PM` casing rules):
+/// * `y`, `yy` (2-digit year), `yyy`/`yyyy` (4-digit year)
+/// * `m` runs: month or minute by context — minute when adjacent to
+///   an hour or seconds token, else month. Lengths: `m`/`mm` numeric,
+///   `mmm` abbrev, `mmmm` full, `mmmmm` first letter.
+/// * `d`, `dd` (day of month); `ddd` (weekday abbrev), `dddd` (full).
+/// * `h`, `hh` (hour: 12-hour iff section contains an AM/PM marker).
+/// * `s`, `ss` (second).
+/// * `AM/PM`, `am/pm`, `A/P`, `a/p` — 12-hour suffix; emitted with the
+///   matched casing.
+/// * `"text"` quoted literal, `\x` backslash-escape, `_x` width-spacer
+///   (one space + drop next), `*x` fill-repeat (dropped).
+/// * `[…]` cosmetic / locale brackets — dropped.
+/// * `;` section separator — only the first section is rendered for
+///   dates/times (negative/zero/text sections don't apply).
+pub fn format_datetime_excel(serial: f64, fmt: &str) -> String {
+    // Only the positive section drives date/time rendering.
+    let section = first_section(fmt);
+    let tokens = tokenize_excel_datetime(section);
+    let has_ampm = tokens.iter().any(|t| matches!(t, ExcelToken::AmPm { .. }));
+    render_excel_datetime(serial, &tokens, has_ampm)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExcelToken {
+    Year(usize),
+    /// Month/minute is decided after tokenisation by neighbour scan.
+    /// `len` is the run length; `is_minute` set during disambiguation.
+    MorMin {
+        len: usize,
+        is_minute: bool,
+    },
+    Day(usize),
+    Hour(usize),
+    Second(usize),
+    /// `lower=true` means render `am`/`pm`; `short=true` means `A`/`P`.
+    AmPm {
+        lower: bool,
+        short: bool,
+    },
+    Literal(String),
+}
+
+/// Split `fmt` at unquoted/un-bracketed `;` and return the first
+/// section. Mirrors how Excel sections are delimited.
+fn first_section(fmt: &str) -> &str {
+    let bytes = fmt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'[' => {
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'\\' => i += 2,
+            b';' => return &fmt[..i],
+            _ => i += 1,
+        }
+    }
+    fmt
+}
+
+fn tokenize_excel_datetime(section: &str) -> Vec<ExcelToken> {
+    let bytes = section.as_bytes();
+    let mut tokens: Vec<ExcelToken> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'"' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+                push_literal(&mut tokens, &section[start..i]);
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'\\' => {
+                if i + 1 < bytes.len() {
+                    push_literal(&mut tokens, &section[i + 1..i + 2]);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            b'_' => {
+                push_literal(&mut tokens, " ");
+                i += 2;
+            }
+            b'*' => {
+                // Fill-repeat — consume next char and emit nothing.
+                i += 2;
+            }
+            b'[' => {
+                // Drop entire bracketed run; cosmetic / locale tag.
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'y' | b'Y' => {
+                let len = run_len(bytes, i, |b| matches!(b, b'y' | b'Y'));
+                tokens.push(ExcelToken::Year(len));
+                i += len;
+            }
+            b'm' | b'M' => {
+                let len = run_len(bytes, i, |b| matches!(b, b'm' | b'M'));
+                tokens.push(ExcelToken::MorMin {
+                    len,
+                    is_minute: false,
+                });
+                i += len;
+            }
+            b'd' | b'D' => {
+                let len = run_len(bytes, i, |b| matches!(b, b'd' | b'D'));
+                tokens.push(ExcelToken::Day(len));
+                i += len;
+            }
+            b'h' | b'H' => {
+                let len = run_len(bytes, i, |b| matches!(b, b'h' | b'H'));
+                tokens.push(ExcelToken::Hour(len));
+                i += len;
+            }
+            b's' | b'S' => {
+                let len = run_len(bytes, i, |b| matches!(b, b's' | b'S'));
+                tokens.push(ExcelToken::Second(len));
+                i += len;
+            }
+            b'A' | b'a' | b'P' | b'p' => {
+                if let Some((consumed, lower, short)) = match_ampm(&section[i..]) {
+                    tokens.push(ExcelToken::AmPm { lower, short });
+                    i += consumed;
+                } else {
+                    push_literal(&mut tokens, &section[i..i + 1]);
+                    i += 1;
+                }
+            }
+            _ => {
+                push_literal(&mut tokens, &section[i..i + 1]);
+                i += 1;
+            }
+        }
+    }
+    disambiguate_minutes(&mut tokens);
+    tokens
+}
+
+fn run_len(bytes: &[u8], start: usize, pred: impl Fn(u8) -> bool) -> usize {
+    let mut n = 0;
+    while start + n < bytes.len() && pred(bytes[start + n]) {
+        n += 1;
+    }
+    n
+}
+
+fn push_literal(tokens: &mut Vec<ExcelToken>, s: &str) {
+    if s.is_empty() {
+        return;
+    }
+    if let Some(ExcelToken::Literal(prev)) = tokens.last_mut() {
+        prev.push_str(s);
+    } else {
+        tokens.push(ExcelToken::Literal(s.to_string()));
+    }
+}
+
+/// Match `AM/PM`, `am/pm`, `A/P`, `a/p` at the head of `s`.
+/// Returns `(consumed_bytes, lowercase, short)`.
+fn match_ampm(s: &str) -> Option<(usize, bool, bool)> {
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("am/pm") {
+        // Casing is determined by the first byte of the actual input.
+        let is_lower = s.as_bytes().first() == Some(&b'a');
+        Some((5, is_lower, false))
+    } else if lower.starts_with("a/p") {
+        let is_lower = s.as_bytes().first() == Some(&b'a');
+        Some((3, is_lower, true))
+    } else {
+        None
+    }
+}
+
+/// Mark `MorMin` runs as minute when they neighbour a time token.
+/// Excel rule: `m`/`mm` is a minute when the nearest non-literal
+/// neighbour is `h`/`hh` (preceding) or `s`/`ss` (following).
+fn disambiguate_minutes(tokens: &mut [ExcelToken]) {
+    let n = tokens.len();
+    for idx in 0..n {
+        if !matches!(tokens[idx], ExcelToken::MorMin { .. }) {
+            continue;
+        }
+        let prev = (0..idx).rev().find_map(|j| {
+            if matches!(tokens[j], ExcelToken::Literal(_)) {
+                None
+            } else {
+                Some(&tokens[j])
+            }
+        });
+        let next = ((idx + 1)..n).find_map(|j| {
+            if matches!(tokens[j], ExcelToken::Literal(_)) {
+                None
+            } else {
+                Some(&tokens[j])
+            }
+        });
+        let is_min = matches!(prev, Some(ExcelToken::Hour(_)))
+            || matches!(next, Some(ExcelToken::Second(_)));
+        if let ExcelToken::MorMin { is_minute, .. } = &mut tokens[idx] {
+            *is_minute = is_min;
+        }
+    }
+}
+
+const MONTH_TITLE_ABBREV: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const MONTH_TITLE_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const WEEKDAY_TITLE_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_TITLE_FULL: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+fn render_excel_datetime(serial: f64, tokens: &[ExcelToken], has_ampm: bool) -> String {
+    let (year, month, day) = serial_to_ymd(serial);
+    let (h24, minute, second) = fraction_to_hms(serial);
+    let weekday = weekday_index(serial);
+    let mut out = String::new();
+    for token in tokens {
+        match token {
+            ExcelToken::Year(len) => {
+                if *len <= 2 {
+                    let yy = (year % 100).unsigned_abs();
+                    out.push_str(&format!("{yy:02}"));
+                } else {
+                    out.push_str(&format!("{year:04}"));
+                }
+            }
+            ExcelToken::MorMin { len, is_minute } => {
+                if *is_minute {
+                    match len {
+                        1 => out.push_str(&format!("{minute}")),
+                        _ => out.push_str(&format!("{minute:02}")),
+                    }
+                } else {
+                    let m = (month.saturating_sub(1) as usize).min(11);
+                    match len {
+                        1 => out.push_str(&format!("{month}")),
+                        2 => out.push_str(&format!("{month:02}")),
+                        3 => out.push_str(MONTH_TITLE_ABBREV[m]),
+                        4 => out.push_str(MONTH_TITLE_FULL[m]),
+                        _ => out.push(MONTH_TITLE_ABBREV[m].as_bytes()[0] as char),
+                    }
+                }
+            }
+            ExcelToken::Day(len) => {
+                let w = weekday as usize;
+                match len {
+                    1 => out.push_str(&format!("{day}")),
+                    2 => out.push_str(&format!("{day:02}")),
+                    3 => out.push_str(WEEKDAY_TITLE_ABBREV[w]),
+                    _ => out.push_str(WEEKDAY_TITLE_FULL[w]),
+                }
+            }
+            ExcelToken::Hour(len) => {
+                let h = if has_ampm {
+                    match h24 {
+                        0 => 12,
+                        1..=12 => h24,
+                        _ => h24 - 12,
+                    }
+                } else {
+                    h24
+                };
+                match len {
+                    1 => out.push_str(&format!("{h}")),
+                    _ => out.push_str(&format!("{h:02}")),
+                }
+            }
+            ExcelToken::Second(len) => match len {
+                1 => out.push_str(&format!("{second}")),
+                _ => out.push_str(&format!("{second:02}")),
+            },
+            ExcelToken::AmPm { lower, short } => {
+                let pm = h24 >= 12;
+                let s = match (*short, *lower, pm) {
+                    (false, false, false) => "AM",
+                    (false, false, true) => "PM",
+                    (false, true, false) => "am",
+                    (false, true, true) => "pm",
+                    (true, false, false) => "A",
+                    (true, false, true) => "P",
+                    (true, true, false) => "a",
+                    (true, true, true) => "p",
+                };
+                out.push_str(s);
+            }
+            ExcelToken::Literal(s) => out.push_str(s),
+        }
+    }
+    out
+}
+
+/// Day-of-week index for a Lotus serial: 0 = Sunday, 6 = Saturday.
+/// Serial 1 = 1900-01-01 (real-calendar Monday). The 1900 leap quirk
+/// (serial 60 = fictional Feb 29) means we subtract 1 day for serials
+/// ≥ 60 to align with the real-calendar weekday — matching Excel's
+/// `WEEKDAY()` and the offset used by `serial_to_ymd`.
+fn weekday_index(serial: f64) -> u32 {
+    let days = serial.trunc() as i64;
+    let adjusted = if days >= 60 { days - 1 } else { days };
+    adjusted.rem_euclid(7) as u32
+}
+
+/// Render the time-of-day portion of `serial` as a 12-hour clock with
+/// an `AM`/`PM` suffix. `with_seconds` toggles between D6 (`h:mm:ss
+/// AM/PM`) and D7 (`h:mm AM/PM`). Hours are unpadded (1..12) to match
+/// 1-2-3 R3.4 and Excel's `h:mm AM/PM`; minutes and seconds keep the
+/// two-digit pad.
+fn format_time_12h(serial: f64, with_seconds: bool) -> String {
+    let (h24, m, s) = fraction_to_hms(serial);
+    let (h12, suffix) = match h24 {
+        0 => (12, "AM"),
+        1..=11 => (h24, "AM"),
+        12 => (12, "PM"),
+        _ => (h24 - 12, "PM"),
+    };
+    if with_seconds {
+        format!("{h12}:{m:02}:{s:02} {suffix}")
+    } else {
+        format!("{h12}:{m:02} {suffix}")
+    }
+}
+
 /// Render the time-of-day portion of `serial` per `intl`. `long`
 /// includes seconds (D8); `short` omits them (D9). Time D falls back
 /// to colon glyphs (= Time A) until LICS letter glyphs land.
@@ -240,6 +674,26 @@ fn format_time_intl(serial: f64, intl: TimeIntl, long: bool) -> String {
         (TimeIntl::B, false) => format!("{h:02}.{m:02}"),
         (TimeIntl::C, true) => format!("{h:02},{m:02},{s:02}"),
         (TimeIntl::C, false) => format!("{h:02},{m:02}"),
+    }
+}
+
+const MONTH_ABBREV_UPPER: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+/// Render `serial` using a 1-2-3 letter-month date kind:
+/// * `with_year && with_day` → D1 (`DD-MMM-YY`)
+/// * `with_year && !with_day` → D3 (`MMM-YY`)
+/// * `!with_year && with_day` → D2 (`DD-MMM`)
+fn format_date_letter_month(serial: f64, with_year: bool, with_day: bool) -> String {
+    let (y, m, d) = serial_to_ymd(serial);
+    let mon = MONTH_ABBREV_UPPER[(m.saturating_sub(1) as usize).min(11)];
+    let yy = (y % 100).unsigned_abs();
+    match (with_day, with_year) {
+        (true, true) => format!("{d:02}-{mon}-{yy:02}"),
+        (true, false) => format!("{d:02}-{mon}"),
+        (false, true) => format!("{mon}-{yy:02}"),
+        (false, false) => mon.to_string(),
     }
 }
 
@@ -376,55 +830,22 @@ mod format_number_tests {
     #[test]
     fn scientific_uses_e_notation() {
         let i = intl_default();
-        assert_eq!(
-            format_number(
-                1234.5,
-                Format {
-                    kind: FormatKind::Scientific,
-                    decimals: 2
-                },
-                &i
-            ),
-            "1.23e3"
-        );
+        let sci2 = Format {
+            kind: FormatKind::Scientific,
+            decimals: 2,
+            parens: false,
+            negative_color: None,
+        };
+        assert_eq!(format_number(1234.5, sci2, &i), "1.23e3");
     }
 
     #[test]
     fn plus_minus_bar_draws_bars() {
         let i = intl_default();
-        assert_eq!(
-            format_number(
-                3.0,
-                Format {
-                    kind: FormatKind::PlusMinus,
-                    decimals: 0
-                },
-                &i
-            ),
-            "+++"
-        );
-        assert_eq!(
-            format_number(
-                -2.0,
-                Format {
-                    kind: FormatKind::PlusMinus,
-                    decimals: 0
-                },
-                &i
-            ),
-            "--"
-        );
-        assert_eq!(
-            format_number(
-                0.0,
-                Format {
-                    kind: FormatKind::PlusMinus,
-                    decimals: 0
-                },
-                &i
-            ),
-            ""
-        );
+        let pm = Format::from_kind(FormatKind::PlusMinus);
+        assert_eq!(format_number(3.0, pm, &i), "+++");
+        assert_eq!(format_number(-2.0, pm, &i), "--");
+        assert_eq!(format_number(0.0, pm, &i), "");
     }
 
     fn intl_with(p: Punctuation) -> International {
@@ -481,17 +902,13 @@ mod format_number_tests {
     fn scientific_under_punct_b_swaps_decimal() {
         let i = intl_with(Punctuation::B);
         // The 'e' is just an exponent marker; the decimal is what swaps.
-        assert_eq!(
-            format_number(
-                1234.5,
-                Format {
-                    kind: FormatKind::Scientific,
-                    decimals: 2
-                },
-                &i
-            ),
-            "1,23e3"
-        );
+        let sci2 = Format {
+            kind: FormatKind::Scientific,
+            decimals: 2,
+            parens: false,
+            negative_color: None,
+        };
+        assert_eq!(format_number(1234.5, sci2, &i), "1,23e3");
     }
 
     use crate::international::{CurrencyConfig, CurrencyPosition, NegativeStyle};
@@ -558,6 +975,57 @@ mod format_number_tests {
     }
 
     #[test]
+    fn parens_flag_wraps_currency_positive() {
+        let i = intl_default();
+        let f = Format::currency(2).with_parens();
+        assert_eq!(format_number(1234.5, f, &i), "($1234.50)");
+    }
+
+    #[test]
+    fn parens_flag_wraps_currency_negative_too() {
+        // The flag wraps regardless of sign — the negative sign survives
+        // inside the parens (still distinguishable from a positive).
+        let i = intl_default();
+        let f = Format::currency(2).with_parens();
+        assert_eq!(format_number(-1234.5, f, &i), "(-$1234.50)");
+    }
+
+    #[test]
+    fn parens_flag_wraps_fixed() {
+        let i = intl_default();
+        let f = Format::fixed(2).with_parens();
+        assert_eq!(format_number(42.0, f, &i), "(42.00)");
+    }
+
+    #[test]
+    fn automatic_renders_identically_to_general() {
+        // SPEC §12 calls (A) "Automatic (type-sniffs)". L123's MVP
+        // delegates that sniffing to entry-time inference (see
+        // `parse_typed_value`'s `inferred_format`); the format-time
+        // path treats Automatic as an alias of General. This test
+        // locks that contract so a future change to either branch
+        // keeps the two in lockstep until real sniffing lands.
+        let i = intl_default();
+        let auto = Format::from_kind(FormatKind::Automatic);
+        for &n in &[0.0, 1.0, -1.0, 1.5, 1234567.89, 0.0001, -1e10, 36540.0] {
+            assert_eq!(
+                format_number(n, auto, &i),
+                format_number(n, Format::GENERAL, &i),
+                "Automatic must alias General for n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn parens_flag_skips_general_and_text() {
+        // General/Text/Hidden/LabelOnly/Automatic/Reset don't wrap —
+        // parens is meaningful only for the numeric format kinds.
+        let i = intl_default();
+        let g = Format::GENERAL.with_parens();
+        assert_eq!(format_number(42.0, g, &i), "42");
+    }
+
+    #[test]
     fn currency_uses_configured_symbol() {
         let i = International {
             currency: CurrencyConfig {
@@ -575,16 +1043,10 @@ mod format_number_tests {
     use crate::international::DateIntl;
 
     fn fmt_d4() -> Format {
-        Format {
-            kind: FormatKind::DateLongIntl,
-            decimals: 0,
-        }
+        Format::from_kind(FormatKind::DateLongIntl)
     }
     fn fmt_d5() -> Format {
-        Format {
-            kind: FormatKind::DateShortIntl,
-            decimals: 0,
-        }
+        Format::from_kind(FormatKind::DateShortIntl)
     }
 
     fn intl_with_date(d: DateIntl) -> International {
@@ -640,19 +1102,47 @@ mod format_number_tests {
         assert_eq!(format_number(73050.0, fmt_d4(), &i), "12/31/99");
     }
 
+    fn fmt_d1() -> Format {
+        Format::from_kind(FormatKind::DateDmy)
+    }
+    fn fmt_d2() -> Format {
+        Format::from_kind(FormatKind::DateDm)
+    }
+    fn fmt_d3() -> Format {
+        Format::from_kind(FormatKind::DateMy)
+    }
+
+    #[test]
+    fn date_dmy_renders_dd_mmm_yy_uppercase() {
+        let i = intl_default();
+        // Serial 36540 = 2000-01-15.
+        assert_eq!(format_number(36540.0, fmt_d1(), &i), "15-JAN-00");
+        // Serial 45931 = 2025-10-01 — atlas-model.xlsx Cost Model B1.
+        assert_eq!(format_number(45931.0, fmt_d1(), &i), "01-OCT-25");
+    }
+
+    #[test]
+    fn date_dm_renders_dd_mmm_no_year() {
+        let i = intl_default();
+        assert_eq!(format_number(36540.0, fmt_d2(), &i), "15-JAN");
+        assert_eq!(format_number(45931.0, fmt_d2(), &i), "01-OCT");
+    }
+
+    #[test]
+    fn date_my_renders_mmm_yy_no_day() {
+        let i = intl_default();
+        assert_eq!(format_number(36540.0, fmt_d3(), &i), "JAN-00");
+        // Atlas-model.xlsx Cost Model B1 has format `m/yyyy` → DateMy.
+        assert_eq!(format_number(45931.0, fmt_d3(), &i), "OCT-25");
+    }
+
     use crate::international::TimeIntl;
 
     fn fmt_d8() -> Format {
-        Format {
-            kind: FormatKind::TimeLongIntl,
-            decimals: 0,
-        }
+        Format::from_kind(FormatKind::TimeLongIntl)
     }
     fn fmt_d9() -> Format {
-        Format {
-            kind: FormatKind::TimeShortIntl,
-            decimals: 0,
-        }
+        Format::from_kind(FormatKind::TimeShortIntl)
     }
 
     fn intl_with_time(t: TimeIntl) -> International {
@@ -706,6 +1196,238 @@ mod format_number_tests {
         // 23:59:59.5 should round to 24:00:00 → 00:00:00.
         let near_midnight = 86_399.5 / 86_400.0;
         assert_eq!(format_number(near_midnight, fmt_d8(), &i), "00:00:00");
+    }
+
+    fn fmt_d6() -> Format {
+        Format::from_kind(FormatKind::TimeHmsAmPm)
+    }
+    fn fmt_d7() -> Format {
+        Format::from_kind(FormatKind::TimeHmAmPm)
+    }
+
+    #[test]
+    fn time_hms_ampm_renders_noon_as_12_pm() {
+        let i = intl_default();
+        assert_eq!(format_number(0.5, fmt_d6(), &i), "12:00:00 PM");
+    }
+
+    #[test]
+    fn time_hm_ampm_renders_noon_as_12_pm_no_seconds() {
+        let i = intl_default();
+        assert_eq!(format_number(0.5, fmt_d7(), &i), "12:00 PM");
+    }
+
+    #[test]
+    fn time_ampm_midnight_is_12_am() {
+        let i = intl_default();
+        assert_eq!(format_number(0.0, fmt_d6(), &i), "12:00:00 AM");
+        assert_eq!(format_number(0.0, fmt_d7(), &i), "12:00 AM");
+    }
+
+    #[test]
+    fn time_ampm_morning_hours_unpadded() {
+        let i = intl_default();
+        // 06:00:00 → 6:00:00 AM (no leading zero on hour).
+        assert_eq!(format_number(0.25, fmt_d6(), &i), "6:00:00 AM");
+        // 09:30:00 → 9:30:00 AM.
+        let nine_thirty = (9.0 * 3_600.0 + 30.0 * 60.0) / 86_400.0;
+        assert_eq!(format_number(nine_thirty, fmt_d6(), &i), "9:30:00 AM");
+    }
+
+    #[test]
+    fn time_ampm_afternoon_subtracts_12() {
+        let i = intl_default();
+        // 13:30:00 → 1:30:00 PM.
+        let one_thirty_pm = (13.0 * 3_600.0 + 30.0 * 60.0) / 86_400.0;
+        assert_eq!(format_number(one_thirty_pm, fmt_d6(), &i), "1:30:00 PM");
+        assert_eq!(format_number(one_thirty_pm, fmt_d7(), &i), "1:30 PM");
+    }
+
+    #[test]
+    fn time_ampm_eleven_fifty_nine_pm() {
+        let i = intl_default();
+        // 23:59:59.
+        let almost_midnight = (23.0 * 3_600.0 + 59.0 * 60.0 + 59.0) / 86_400.0;
+        assert_eq!(format_number(almost_midnight, fmt_d6(), &i), "11:59:59 PM");
+    }
+
+    #[test]
+    fn time_ampm_drops_date_part() {
+        let i = intl_default();
+        // 36526.5 = 2000-01-01 noon. D6 shows time only.
+        assert_eq!(format_number(36526.5, fmt_d6(), &i), "12:00:00 PM");
+    }
+
+    #[test]
+    fn time_ampm_wrap_to_midnight_shows_12_am() {
+        let i = intl_default();
+        // Just under 24:00:00 should round to 24:00:00 → 00:00:00 → 12:00:00 AM.
+        let near_midnight = 86_399.5 / 86_400.0;
+        assert_eq!(format_number(near_midnight, fmt_d6(), &i), "12:00:00 AM");
+    }
+}
+
+#[cfg(test)]
+mod excel_datetime_tests {
+    use super::*;
+
+    // Serial 36540 = 2000-01-15 (Saturday). Serial 45931 = 2025-10-01.
+    const JAN_15_2000: f64 = 36540.0;
+    const OCT_1_2025: f64 = 45931.0;
+
+    #[test]
+    fn iso_date_yyyy_mm_dd() {
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "yyyy-mm-dd"),
+            "2000-01-15"
+        );
+    }
+
+    #[test]
+    fn unpadded_yyyy_m_d() {
+        assert_eq!(format_datetime_excel(JAN_15_2000, "yyyy-m-d"), "2000-1-15");
+    }
+
+    #[test]
+    fn padded_yy_renders_two_digits() {
+        assert_eq!(format_datetime_excel(JAN_15_2000, "yy"), "00");
+        assert_eq!(format_datetime_excel(OCT_1_2025, "yy"), "25");
+    }
+
+    #[test]
+    fn d_mmm_yyyy_with_letter_month() {
+        // Excel: "1-Oct-2025" — title-case month abbrev.
+        assert_eq!(
+            format_datetime_excel(OCT_1_2025, "d-mmm-yyyy"),
+            "1-Oct-2025"
+        );
+    }
+
+    #[test]
+    fn mmmm_renders_full_month_name() {
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "mmmm d, yyyy"),
+            "January 15, 2000"
+        );
+    }
+
+    #[test]
+    fn mmmmm_renders_initial_letter() {
+        assert_eq!(format_datetime_excel(JAN_15_2000, "mmmmm"), "J");
+        assert_eq!(format_datetime_excel(OCT_1_2025, "mmmmm"), "O");
+    }
+
+    #[test]
+    fn dddd_renders_full_weekday() {
+        // 2000-01-15 was a Saturday.
+        assert_eq!(format_datetime_excel(JAN_15_2000, "dddd"), "Saturday");
+    }
+
+    #[test]
+    fn ddd_renders_short_weekday() {
+        assert_eq!(format_datetime_excel(JAN_15_2000, "ddd"), "Sat");
+    }
+
+    #[test]
+    fn time_24_hour_hh_mm_ss() {
+        // 0.5 = noon.
+        assert_eq!(format_datetime_excel(0.5, "hh:mm:ss"), "12:00:00");
+    }
+
+    #[test]
+    fn time_12_hour_h_mm_ampm() {
+        assert_eq!(format_datetime_excel(0.5, "h:mm AM/PM"), "12:00 PM");
+        // 0.25 = 6 AM.
+        assert_eq!(format_datetime_excel(0.25, "h:mm AM/PM"), "6:00 AM");
+    }
+
+    #[test]
+    fn time_12_hour_lowercase_ampm() {
+        assert_eq!(format_datetime_excel(0.5, "h:mm am/pm"), "12:00 pm");
+        assert_eq!(format_datetime_excel(0.25, "h:mm am/pm"), "6:00 am");
+    }
+
+    #[test]
+    fn time_12_hour_short_a_p() {
+        assert_eq!(format_datetime_excel(0.5, "h:mm A/P"), "12:00 P");
+        assert_eq!(format_datetime_excel(0.25, "h:mm a/p"), "6:00 a");
+    }
+
+    #[test]
+    fn quoted_literal_preserved() {
+        // Quoted "-" in `yyyy"-"mm"-"dd` should pass through.
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "yyyy\"-\"mm\"-\"dd"),
+            "2000-01-15"
+        );
+        // Multi-character literal.
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "mmm \"of\" yyyy"),
+            "Jan of 2000"
+        );
+    }
+
+    #[test]
+    fn backslash_escape_passes_next_char() {
+        // `\m` should render literal "m", not month.
+        assert_eq!(format_datetime_excel(JAN_15_2000, "yyyy\\-mm"), "2000-01");
+    }
+
+    #[test]
+    fn locale_bracket_is_dropped() {
+        // `[$-409]` is a locale tag and should not appear.
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "[$-409]m/d/yyyy"),
+            "1/15/2000"
+        );
+    }
+
+    #[test]
+    fn minute_disambiguation_after_hour() {
+        // `mm` after `h:` is minute, not month.
+        assert_eq!(format_datetime_excel(0.5, "h:mm"), "12:00");
+    }
+
+    #[test]
+    fn minute_disambiguation_before_seconds() {
+        // `mm` before `:ss` is minute.
+        let almost_one = (3_600.0 + 30.0 * 60.0 + 45.0) / 86_400.0;
+        assert_eq!(format_datetime_excel(almost_one, "mm:ss"), "30:45");
+    }
+
+    #[test]
+    fn month_when_alone_with_date_glyphs() {
+        // No h/s context — `m` is month.
+        assert_eq!(format_datetime_excel(JAN_15_2000, "m/d/yyyy"), "1/15/2000");
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "mm/dd/yyyy"),
+            "01/15/2000"
+        );
+    }
+
+    #[test]
+    fn underscore_spacer_emits_space_consumes_next() {
+        // Excel `_x` reserves space the width of x — render as a single space.
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "mm/dd/yyyy_)"),
+            "01/15/2000 "
+        );
+    }
+
+    #[test]
+    fn first_section_used_for_dates() {
+        // Sections are positive;negative;zero;text. For dates, only positive matters.
+        assert_eq!(
+            format_datetime_excel(JAN_15_2000, "yyyy-mm-dd;@"),
+            "2000-01-15"
+        );
+    }
+
+    #[test]
+    fn d3_style_mmm_yy_round_trip_format() {
+        // The atlas-model.xlsx fixture uses `mmm-yyyy`. Display should match
+        // Excel's intent: "Oct-2025".
+        assert_eq!(format_datetime_excel(OCT_1_2025, "mmm-yyyy"), "Oct-2025");
     }
 }
 

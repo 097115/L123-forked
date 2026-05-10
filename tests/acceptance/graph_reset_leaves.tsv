@@ -1,0 +1,129 @@
+# /Graph Reset {X | A-F | Ranges | Options} — clear individual
+# slots without nuking the whole graph.
+#
+# Slice F (reset leaves) of GRAPH_PLAN.md. The Reset Graph leaf
+# already worked (clears everything to default). This slice promotes
+# the per-slot leaves from NotImplemented stubs to real actions:
+#   X     — clear def.x only
+#   A..F  — clear def.data[i] only
+#   Ranges — clear def.x and all of def.data, keep type/features/options
+#   Options — restore def.options to default, keep ranges and type
+# Reference p. 2-219, 0102-graph-reset.html.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 2, 3, 4 so /GA has cells to point at.
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# /GTB then /GA over A1..A4 then /GX over A1..A4 (cheap dummy).
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# Set a Title and a Legend so we can confirm Reset Options restores
+# defaults.
+KEY /
+KEY G
+KEY O
+KEY T
+KEY F
+KEYS Sales
+ENTER
+KEY /
+KEY G
+KEY O
+KEY L
+KEY A
+KEYS NetA
+ENTER
+
+ASSERT_GRAPH_TYPE       BAR
+ASSERT_GRAPH_SERIES  A  A:A1..A:A4
+ASSERT_GRAPH_SERIES  X  A:A1..A:A4
+ASSERT_GRAPH_TITLE   First   Sales
+ASSERT_GRAPH_LEGEND  A       NetA
+
+# /GRX — clear X only.
+KEY /
+KEY G
+KEY R
+KEY X
+ASSERT_MODE             READY
+ASSERT_GRAPH_SERIES  X  none
+ASSERT_GRAPH_SERIES  A  A:A1..A:A4
+ASSERT_GRAPH_TITLE   First   Sales
+
+# /GRA — clear A only.
+KEY /
+KEY G
+KEY R
+KEY A
+ASSERT_MODE             READY
+ASSERT_GRAPH_SERIES  A  none
+
+# Re-bind A and X so we can test Ranges / Options below.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GRR — Reset Ranges. Clears X and A..F, leaves type/options
+# alone.
+KEY /
+KEY G
+KEY R
+KEY R
+ASSERT_MODE             READY
+ASSERT_GRAPH_TYPE       BAR
+ASSERT_GRAPH_SERIES  X  none
+ASSERT_GRAPH_SERIES  A  none
+ASSERT_GRAPH_TITLE   First   Sales
+ASSERT_GRAPH_LEGEND  A       NetA
+
+# /GRO — Reset Options. Restores options (titles, legends, …) to
+# default; keeps the type and (already-empty) ranges.
+KEY /
+KEY G
+KEY R
+KEY O
+ASSERT_MODE             READY
+ASSERT_GRAPH_TYPE       BAR
+ASSERT_GRAPH_TITLE   First   none
+ASSERT_GRAPH_LEGEND  A       none

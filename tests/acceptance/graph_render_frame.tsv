@@ -1,0 +1,89 @@
+# /Graph F10 view — Frame edges render per features.frame mask.
+#
+# Slice F3 of GRAPH_PLAN.md. Default frame is all four sides on
+# (Reference p. 2-198), so a fresh graph shows ┌┐└┘ corners and
+# ─/│ edges around the plot area. /Graph Type Features Frame
+# Clear removes every side; Frame All restores them; per-side
+# Yes/No flips a single edge.
+
+SIZE 80 30
+
+# Seed A1..A5 = 1..5 and pick Bar.
+KEYS 1
+ENTER
+KEYS 2
+ENTER
+KEYS 3
+ENTER
+KEYS 4
+ENTER
+KEYS 5
+ENTER
+HOME
+KEY /
+KEY G
+KEY T
+KEY B
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+DOWN
+ENTER
+
+# Default: all four sides on, all four corners present.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     ┌
+ASSERT_SCREEN     ┐
+ASSERT_SCREEN     └
+ASSERT_SCREEN     ┘
+ESC
+
+# /GTFFC — Frame Clear.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY C
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  ┌
+ASSERT_SCREEN_NOT_CONTAINS  ┐
+ASSERT_SCREEN_NOT_CONTAINS  └
+ASSERT_SCREEN_NOT_CONTAINS  ┘
+ESC
+
+# /GTFFA — Frame All restores everything.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY A
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     ┌
+ASSERT_SCREEN     ┘
+ESC
+
+# /GTFFLN — Left off; top-left and bottom-left corners go away,
+# but top-right and bottom-right stay.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY F
+KEY L
+KEY N
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN_NOT_CONTAINS  ┌
+ASSERT_SCREEN_NOT_CONTAINS  └
+ASSERT_SCREEN     ┐
+ASSERT_SCREEN     ┘
+ESC
+ASSERT_MODE       READY

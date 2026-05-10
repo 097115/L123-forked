@@ -1,0 +1,79 @@
+# /Graph Options Data-Labels — render label text in the F10 stack
+# view at the chosen placement.
+#
+# Slice F (data labels render — stack) of GRAPH_PLAN.md. Mirrors
+# the bar-chart slice but uses /GTS (Stack). Each segment of each
+# stacked column gets its data label painted at the placement
+# offset relative to the segment's top.
+# Reference p. 2-217.
+
+SIZE 80 30
+
+# Seed A1..A4 = 1, 2, 3, 4 (stack series).
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+KEYS 3
+DOWN
+KEYS 4
+DOWN
+HOME
+
+# Seed B1..B4 = Q1..Q4 (label text).
+RIGHT
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+KEYS Q4
+DOWN
+HOME
+
+# /GTS — Stack graph type.
+KEY /
+KEY G
+KEY T
+KEY S
+
+# /GA over A1..A4.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GOD A over B1..B4 with placement Above.
+RIGHT
+KEY /
+KEY G
+KEY O
+KEY D
+KEY A
+DOWN
+DOWN
+DOWN
+ENTER
+KEY A
+ASSERT_MODE          READY
+ASSERT_GRAPH_DATA_LABELS  A          A:B1..A:B4
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Above
+
+# F10 — labels render alongside the stacked bars. The fourth bar
+# (max stack height) reaches the top of the plot, so its
+# Above-placed label is suppressed at the top edge. Q1..Q3 render
+# above their stacks.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN        █
+ASSERT_SCREEN        Q1
+ASSERT_SCREEN        Q2
+ASSERT_SCREEN        Q3
+
+ESC
+ASSERT_MODE          READY

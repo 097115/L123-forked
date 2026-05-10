@@ -1,0 +1,78 @@
+# /Graph Options Scale {Y|X|2Y} {Lower|Upper} — store the manual
+# axis bounds.
+#
+# Slice F (scale bounds) of GRAPH_PLAN.md. Until this slice the
+# Lower/Upper leaves were NotImplemented stubs; only Auto/Manual
+# wrote to the model. After: each leaf opens a numeric prompt that
+# accepts a signed decimal (e.g. -5.5, 200) and stores it in
+# `ScaleAxis::lower` / `upper`. Pre-existing value pre-fills the
+# prompt; an empty buffer + Enter clears the bound back to None.
+# Reference p. 2-204 → 2-214.
+
+SIZE 80 30
+
+# Defaults: every bound unset.
+ASSERT_GRAPH_SCALE_BOUND  Y   LOWER  none
+ASSERT_GRAPH_SCALE_BOUND  Y   UPPER  none
+ASSERT_GRAPH_SCALE_BOUND  X   LOWER  none
+ASSERT_GRAPH_SCALE_BOUND  2Y  UPPER  none
+
+# /GOSY L 100 — Y Lower = 100.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY L
+KEYS 100
+ENTER
+ASSERT_MODE                READY
+ASSERT_GRAPH_SCALE_BOUND   Y   LOWER  100
+
+# /GOSY U 200 — Y Upper = 200.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY U
+KEYS 200
+ENTER
+ASSERT_GRAPH_SCALE_BOUND   Y   UPPER  200
+
+# /GOSX L -5.5 — X Lower = -5.5 (signed decimal).
+KEY /
+KEY G
+KEY O
+KEY S
+KEY X
+KEY L
+KEYS -5.5
+ENTER
+ASSERT_GRAPH_SCALE_BOUND   X   LOWER  -5.5
+
+# /GOS2 U 1000 — 2Y Upper = 1000.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY 2
+KEY U
+KEYS 1000
+ENTER
+ASSERT_GRAPH_SCALE_BOUND   2Y  UPPER  1000
+
+# Re-open Y Lower; pre-fills with "100"; backspace 3 times then
+# ENTER clears the bound back to None.
+KEY /
+KEY G
+KEY O
+KEY S
+KEY Y
+KEY L
+BACKSPACE
+BACKSPACE
+BACKSPACE
+ENTER
+ASSERT_GRAPH_SCALE_BOUND   Y   LOWER  none
+ASSERT_GRAPH_SCALE_BOUND   Y   UPPER  200

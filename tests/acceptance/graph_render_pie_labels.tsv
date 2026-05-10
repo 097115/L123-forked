@@ -1,0 +1,70 @@
+# /Graph Save SVG — Pie wedge labels come from /Graph X cell text.
+#
+# Slice F (pie labels) of GRAPH_PLAN.md. Before this slice draw_pie
+# labelled wedges with positional indices ("1", "2", …). The X-range
+# in 1-2-3 R3.4a names the categorical axis; for a Pie it's the
+# label per wedge. Cell text under the X range now flows through
+# GraphValues.x_labels and into the rendered SVG.
+# Reference p. 2-156, p. 2-216.
+
+SIZE 80 30
+
+# Seed B1..B3 = 30, 20, 50 (numeric values).
+RIGHT
+KEYS 30
+DOWN
+KEYS 20
+DOWN
+KEYS 50
+DOWN
+HOME
+
+# Seed A1..A3 = label text (entered as labels, not numbers).
+KEYS Apples
+DOWN
+KEYS Pears
+DOWN
+KEYS Plums
+DOWN
+HOME
+
+# /GTP — Pie graph type.
+KEY /
+KEY G
+KEY T
+KEY P
+ASSERT_GRAPH_TYPE       PIE
+
+# /GA over B1..B3 — values series. POINT-prompt anchor is the cell
+# pointer at the time /GA is pressed, so move to B1 first.
+RIGHT
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:B1..A:B3
+HOME
+
+# /GX over A1..A3 — wedge labels.
+KEY /
+KEY G
+KEY X
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  X  A:A1..A:A3
+
+# /GS — save SVG to a temp file; the wedge label text should land
+# in the SVG.
+RM_FILE $TMPDIR/pie.svg
+KEY /
+KEY G
+KEY S
+KEYS $TMPDIR/pie.svg
+ENTER
+ASSERT_MODE             READY
+ASSERT_FILE_CONTAINS    $TMPDIR/pie.svg  Apples
+ASSERT_FILE_CONTAINS    $TMPDIR/pie.svg  Pears
+ASSERT_FILE_CONTAINS    $TMPDIR/pie.svg  Plums

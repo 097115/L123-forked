@@ -225,6 +225,27 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_SCREEN_COL <x> <substring>" — substring search
+            // down a single buffer column. Used for vertical text such
+            // as the Y-Axis title (one character per row).
+            "ASSERT_SCREEN_COL" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let x_tok = parts.next().unwrap_or("");
+                let want = parts.next().unwrap_or("").trim();
+                let x: u16 = x_tok.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_SCREEN_COL bad x coordinate {x_tok:?}",
+                        path.display()
+                    )
+                });
+                let buf = app.render_to_buffer(width, height);
+                let col = App::column_text(&buf, x);
+                assert!(
+                    col.contains(want),
+                    "{}:{line_no}: column {x} does not contain {want:?} (got {col:?})",
+                    path.display()
+                );
+            }
             "ASSERT_SCREEN_NOT_CONTAINS" => {
                 let buf = app.render_to_buffer(width, height);
                 let hit = (0..height).find(|y| App::line_text(&buf, *y).contains(rest));
@@ -481,6 +502,312 @@ fn run_transcript(path: &Path) {
                     path.display()
                 );
             }
+            // "ASSERT_GRAPH_NAMES_COUNT 2" — number of named graphs
+            // stored on the current workbook (Workbook::graphs).
+            "ASSERT_GRAPH_NAMES_COUNT" => {
+                let want: usize = rest.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_NAMES_COUNT expects an integer, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_names_count();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph names count expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_MODE Y AUTO" — axis token (Y, X, or 2)
+            // and expected mode (AUTO | MANUAL).
+            "ASSERT_GRAPH_SCALE_MODE" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("").trim();
+                let got = app.graph_scale_mode_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale mode {axis_ch} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_BOUND Y LOWER 100" — axis token
+            // (Y, X, or 2), bound kind (LOWER | UPPER), expected
+            // numeric value (or `none` for unset).
+            "ASSERT_GRAPH_SCALE_BOUND" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let kind_tok = parts.next().unwrap_or("");
+                let want_raw = parts.next().unwrap_or("");
+                let want: Option<f64> = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw.parse().unwrap_or_else(|_| {
+                        panic!(
+                            "{}:{line_no}: ASSERT_GRAPH_SCALE_BOUND expected number or 'none', got {want_raw:?}",
+                            path.display()
+                        )
+                    }))
+                };
+                let upper = matches!(kind_tok.to_ascii_uppercase().as_str(), "UPPER");
+                let got = app.graph_scale_bound(axis_ch, upper);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale bound {axis_ch} {kind_tok} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_SKIP 5" — current skip factor.
+            "ASSERT_GRAPH_SCALE_SKIP" => {
+                let want: u32 = rest.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_SCALE_SKIP expects an integer, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_scale_skip();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph skip expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_DATA_LABELS A  A:A1..A:A5" — slot letter
+            // A..F then expected range string. Use `none` (or empty
+            // trailer) for an unset slot.
+            "ASSERT_GRAPH_DATA_LABELS" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    ""
+                } else {
+                    want_raw
+                };
+                let slot = match slot_ch.to_ascii_uppercase() {
+                    'A' => 0,
+                    'B' => 1,
+                    'C' => 2,
+                    'D' => 3,
+                    'E' => 4,
+                    'F' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_DATA_LABELS bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_data_labels_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph data-labels {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_INDICATOR Y Yes" — axis token (Y,
+            // X, or 2) and expected magnitude indicator setting.
+            "ASSERT_GRAPH_SCALE_INDICATOR" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let got = app.graph_scale_indicator_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale indicator {axis_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_EXPONENT Y 3" — axis token (Y, X,
+            // or 2) and expected order-of-magnitude shift.
+            "ASSERT_GRAPH_SCALE_EXPONENT" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("");
+                let want: i8 = want_raw.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_SCALE_EXPONENT expects an integer, got {want_raw:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_scale_exponent(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale exponent {axis_ch} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_WIDTH Y 8" — axis token (Y, X, or
+            // 2) and expected scale-label max width.
+            "ASSERT_GRAPH_SCALE_WIDTH" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("");
+                let want: u8 = want_raw.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_SCALE_WIDTH expects an integer, got {want_raw:?}",
+                        path.display()
+                    )
+                });
+                let got = app.graph_scale_width(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale width {axis_ch} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_SCALE_TYPE Y Linear" — axis token (Y, X,
+            // or 2) and expected scale type ("Linear" or
+            // "Logarithmic").
+            "ASSERT_GRAPH_SCALE_TYPE" => {
+                let mut parts = rest.split_whitespace();
+                let axis_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let got = app.graph_scale_type_str(axis_ch);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph scale type {axis_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_GRID_Y_AXIS Y" — current y-axis grid
+            // origin (one of `none`, `Y`, `2Y`, `Both`).
+            "ASSERT_GRAPH_GRID_Y_AXIS" => {
+                let want = rest.trim();
+                let got = app.graph_grid_y_axis_str();
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: grid y-axis expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_DATA_LABELS_PLACEMENT A  Center" — slot
+            // letter A..F, then expected placement (Center | Left |
+            // Above | Right | Below).
+            "ASSERT_GRAPH_DATA_LABELS_PLACEMENT" => {
+                let mut parts = rest.split_whitespace();
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("");
+                let slot = match slot_ch {
+                    'A' | 'a' => 0,
+                    'B' | 'b' => 1,
+                    'C' | 'c' => 2,
+                    'D' | 'd' => 3,
+                    'E' | 'e' => 4,
+                    'F' | 'f' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_DATA_LABELS_PLACEMENT bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_data_labels_placement_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: data-labels placement {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_LEGEND A  Net Sales" — slot letter A..F
+            // then expected text. Use `none` (or empty trailer) for
+            // an unset legend.
+            "ASSERT_GRAPH_LEGEND" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_ch = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw)
+                };
+                let slot = match slot_ch.to_ascii_uppercase() {
+                    'A' => 0,
+                    'B' => 1,
+                    'C' => 2,
+                    'D' => 3,
+                    'E' => 4,
+                    'F' => 5,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_LEGEND bad slot {slot_ch:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_legend_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph legend {slot_ch} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_TITLE First  Sales 1991" — slot token then
+            // the expected text. Tokens: First, Second, X, Y, 2Y, Note,
+            // Other. Use the literal `none` (or empty trailer) for unset.
+            "ASSERT_GRAPH_TITLE" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot_tok = parts.next().unwrap_or("");
+                let want_raw = parts.next().unwrap_or("").trim();
+                let want = if want_raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(want_raw)
+                };
+                use l123_ui::GraphTitleSlot;
+                let slot = match slot_tok {
+                    "First" => GraphTitleSlot::First,
+                    "Second" => GraphTitleSlot::Second,
+                    "X" => GraphTitleSlot::XAxis,
+                    "Y" => GraphTitleSlot::YAxis,
+                    "2Y" => GraphTitleSlot::TwoYAxis,
+                    "Note" => GraphTitleSlot::Note,
+                    "Other" => GraphTitleSlot::OtherNote,
+                    _ => panic!(
+                        "{}:{line_no}: ASSERT_GRAPH_TITLE bad slot {slot_tok:?}",
+                        path.display()
+                    ),
+                };
+                let got = app.graph_title_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph title {slot_tok} expected {want:?} got {got:?}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_FORMAT A  BOTH" — slot letter A..F, then
+            // expected format token (LINES, SYMBOLS, BOTH, NEITHER, AREA).
+            "ASSERT_GRAPH_FORMAT" => {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let slot = parts.next().unwrap_or("").chars().next().unwrap_or(' ');
+                let want = parts.next().unwrap_or("").trim();
+                let got = app.graph_format_str(slot);
+                assert_eq!(
+                    got,
+                    want,
+                    "{}:{line_no}: graph format {slot} expected {want} got {got}",
+                    path.display()
+                );
+            }
+            // "ASSERT_GRAPH_GRID hv" — assert the current graph's /Graph
+            // Options Grid mask. Token is the lowercase letters of the
+            // active flags (h, v, y) in that order, or `none`.
+            "ASSERT_GRAPH_GRID" => {
+                let got = app.graph_grid_str();
+                assert_eq!(
+                    got,
+                    rest,
+                    "{}:{line_no}: graph grid expected {rest} got {got}",
+                    path.display()
+                );
+            }
             "ASSERT_BEEP_COUNT" => {
                 let want: u64 = rest.parse().unwrap_or_else(|_| {
                     panic!(
@@ -601,6 +928,36 @@ fn run_transcript(path: &Path) {
             // Clear the hover state set by a prior `HOVER_ICON`.
             "HOVER_CLEAR" => {
                 app.clear_hovered_icon();
+            }
+            // "ICON_CLICK <panel> <slot>" — dispatch the SmartIcon at
+            // `(panel, slot)` directly, mirroring a real click. The
+            // headless render buffer has no real icon panel to hit-test
+            // against, so the harness short-circuits the mouse-coord
+            // path and pokes the App's dispatcher.
+            "ICON_CLICK" => {
+                let mut parts = rest.split_ascii_whitespace();
+                let panel_n: u8 = parts.next().unwrap_or("").parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ICON_CLICK expects `<panel 1..7> <slot 0..16>`, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let slot: usize = parts.next().unwrap_or("").parse().unwrap_or_else(|_| {
+                    panic!(
+                        "{}:{line_no}: ICON_CLICK expects `<panel 1..7> <slot 0..16>`, got {rest:?}",
+                        path.display()
+                    )
+                });
+                let panel = l123_graph::Panel::ORDER
+                    .get(panel_n.saturating_sub(1) as usize)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}:{line_no}: ICON_CLICK panel number must be 1..=7, got {panel_n}",
+                            path.display()
+                        )
+                    });
+                app.dispatch_icon_for_test(panel, slot);
             }
             // "MOUSE_CLICK <col> <row>" — synthesize a left-button
             // mouse-down at the given terminal coordinates. Grid-click
@@ -953,6 +1310,15 @@ transcripts! {
     m3_range_justify            => "m3_range_justify.tsv",
     m3_range_format_hidden      => "m3_range_format_hidden.tsv",
     m3_range_format_time        => "m3_range_format_time.tsv",
+    m3_range_format_plus_minus  => "m3_range_format_plus_minus.tsv",
+    m3_range_format_other_automatic => "m3_range_format_other_automatic.tsv",
+    m3_range_format_other_label     => "m3_range_format_other_label.tsv",
+    m3_range_format_parens          => "m3_range_format_parens.tsv",
+    m3_range_format_neg_color       => "m3_range_format_neg_color.tsv",
+    m3_range_format_text_shows_formula => "m3_range_format_text_shows_formula.tsv",
+    m3_range_format_label_only      => "m3_range_format_label_only.tsv",
+    m3_range_format_label_only_input => "m3_range_format_label_only_input.tsv",
+    m3_xlsx_phase2_round_trip       => "m3_xlsx_phase2_round_trip.tsv",
     m3_beep_edge       => "M3_beep_edge.tsv",
     m4_file_save       => "M4_file_save.tsv",
     m4_file_save_replace => "M4_file_save_replace.tsv",
@@ -989,7 +1355,12 @@ transcripts! {
     wgdo_clock         => "wgdo_clock.tsv",
     m5_wg_format       => "M5_wg_format.tsv",
     m5_wg_format_date  => "M5_wg_format_date.tsv",
+    m5_wg_format_date_time => "m5_wg_format_date_time.tsv",
+    m5_wg_format_hidden    => "m5_wg_format_hidden.tsv",
     m5_wg_format_undo  => "M5_wg_format_undo.tsv",
+    m5_wg_format_plus_minus => "m5_wg_format_plus_minus.tsv",
+    m5_wg_format_other_automatic => "m5_wg_format_other_automatic.tsv",
+    m5_wg_format_other_label     => "m5_wg_format_other_label.tsv",
     m5_ws_titles       => "M5_ws_titles.tsv",
     m5_ws_hide         => "M5_ws_hide.tsv",
     m5_wgd_status            => "M5_wgd_status.tsv",
@@ -1003,7 +1374,6 @@ transcripts! {
     // Time Intl (D8/D9) rendering is unit-tested in l123-core/format;
     // exposing D8/D9 via /RF Date Time is a separate menu-wiring task.
     m5_wgdo_intl_undo      => "M5_wgdo_intl_undo.tsv",
-    m5_wgdo_intl_stat      => "M5_wgdo_intl_stat.tsv",
     m6_print_file      => "M6_print_file.tsv",
     m6_print_multi_range => "m6_print_multi_range.tsv",
     m6_print_options_header => "M6_print_options_header.tsv",
@@ -1013,6 +1383,7 @@ transcripts! {
     m6_print_advanced_device => "M6_print_advanced_device.tsv",
     m6_print_pipe_row  => "M6_print_pipe_row.tsv",
     m6_ws_page         => "M6_ws_page.tsv",
+    m6_ws_page_column  => "M6_ws_page_column.tsv",
     m6_range_search_replace => "M6_range_search_replace.tsv",
     m6_print_cell_formulas  => "M6_print_cell_formulas.tsv",
     m6_print_margins        => "M6_print_margins.tsv",
@@ -1026,14 +1397,64 @@ transcripts! {
     m7_graph_series     => "M7_graph_series.tsv",
     m7_graph_reset      => "M7_graph_reset.tsv",
     m7_graph_view_f10   => "M7_graph_view_f10.tsv",
+    graph_view_full_screen => "graph_view_full_screen.tsv",
     m7_graph_save       => "M7_graph_save.tsv",
+    graph_settings_visible => "graph_settings_visible.tsv",
+    graph_features_toggles => "graph_features_toggles.tsv",
+    graph_features_y_axis_and_frame => "graph_features_y_axis_and_frame.tsv",
+    graph_options_color => "graph_options_color.tsv",
+    graph_options_grid => "graph_options_grid.tsv",
+    graph_options_format => "graph_options_format.tsv",
+    graph_options_titles => "graph_options_titles.tsv",
+    graph_options_legend => "graph_options_legend.tsv",
+    graph_options_legend_range => "graph_options_legend_range.tsv",
+    graph_reset_leaves => "graph_reset_leaves.tsv",
+    graph_options_scale_bounds => "graph_options_scale_bounds.tsv",
+    graph_frame_y_axis => "graph_frame_y_axis.tsv",
+    graph_name_table => "graph_name_table.tsv",
+    graph_data_labels_placement => "graph_data_labels_placement.tsv",
+    graph_options_grid_y_axis => "graph_options_grid_y_axis.tsv",
+    graph_options_scale_type => "graph_options_scale_type.tsv",
+    graph_options_scale_width => "graph_options_scale_width.tsv",
+    graph_options_scale_exponent => "graph_options_scale_exponent.tsv",
+    graph_options_scale_indicator => "graph_options_scale_indicator.tsv",
+    graph_render_data_labels => "graph_render_data_labels.tsv",
+    graph_render_data_labels_bar => "graph_render_data_labels_bar.tsv",
+    graph_render_data_labels_stack => "graph_render_data_labels_stack.tsv",
+    graph_render_data_labels_xy => "graph_render_data_labels_xy.tsv",
+    graph_render_data_labels_hlco => "graph_render_data_labels_hlco.tsv",
+    graph_render_data_labels_bar_horizontal => "graph_render_data_labels_bar_horizontal.tsv",
+    graph_options_data_labels => "graph_options_data_labels.tsv",
+    graph_options_scale => "graph_options_scale.tsv",
+    graph_options_advanced_shell => "graph_options_advanced_shell.tsv",
+    graph_name => "graph_name.tsv",
+    graph_group => "graph_group.tsv",
+    graph_render_titles => "graph_render_titles.tsv",
+    graph_render_legend => "graph_render_legend.tsv",
+    graph_render_grid => "graph_render_grid.tsv",
+    graph_render_frame => "graph_render_frame.tsv",
+    graph_render_orientation => "graph_render_orientation.tsv",
+    graph_render_stacked => "graph_render_stacked.tsv",
+    graph_render_percent => "graph_render_percent.tsv",
+    graph_render_table => "graph_render_table.tsv",
+    graph_render_clustered_bar => "graph_render_clustered_bar.tsv",
+    graph_render_drop_shadow => "graph_render_drop_shadow.tsv",
+    graph_render_notes => "graph_render_notes.tsv",
+    graph_render_y_axis_title => "graph_render_y_axis_title.tsv",
+    graph_render_pie_labels => "graph_render_pie_labels.tsv",
+    graph_render_pie_unicode => "graph_render_pie_unicode.tsv",
+    graph_render_xy_unicode => "graph_render_xy_unicode.tsv",
+    graph_render_mixed_unicode => "graph_render_mixed_unicode.tsv",
+    graph_render_hlco_unicode => "graph_render_hlco_unicode.tsv",
     m10_startup_splash  => "M10_startup_splash.tsv",
     m11_f1_help_open_close => "m11_f1_help_open_close.tsv",
+    m11_f1_help_menu_context => "m11_f1_help_menu_context.tsv",
     m10_status_line_filename => "M10_status_line_filename.tsv",
     m10_status_line_dirty    => "m10_status_line_dirty.tsv",
     m10_worksheet_status     => "M10_worksheet_status.tsv",
     m10_label_spill          => "M10_label_spill.tsv",
     m10_wysiwyg_bold         => "M10_wysiwyg_bold.tsv",
+    m10_wysiwyg_lines        => "m10_wysiwyg_lines.tsv",
     m10_wysiwyg_compound     => "M10_wysiwyg_compound.tsv",
     m10_wysiwyg_clear        => "M10_wysiwyg_clear.tsv",
     m10_wysiwyg_undo         => "M10_wysiwyg_undo.tsv",
@@ -1044,6 +1465,9 @@ transcripts! {
     m10_wysiwyg_col_width    => "M10_wysiwyg_col_width.tsv",
     m10_wysiwyg_display_mode => "M10_wysiwyg_display_mode.tsv",
     m10_wysiwyg_display_grid => "M10_wysiwyg_display_grid.tsv",
+    m10_wysiwyg_special_copy  => "M10_wysiwyg_special_copy.tsv",
+    m10_wysiwyg_special_move  => "M10_wysiwyg_special_move.tsv",
+    m10_wysiwyg_special_color => "M10_wysiwyg_special_color.tsv",
     m10_xlsx_format_round_trip  => "M10_xlsx_format_round_trip.tsv",
     m10_status_line_sheet       => "M10_status_line_sheet.tsv",
     m10_icon_hover              => "M10_icon_hover.tsv",
@@ -1063,6 +1487,7 @@ transcripts! {
     xlsx_frozen                  => "xlsx_frozen.tsv",
     xlsx_hidden_sheets           => "xlsx_hidden_sheets.tsv",
     xlsx_tables                  => "xlsx_tables.tsv",
+    xlsx_date_formats            => "xlsx_date_formats.tsv",
     t01_tutorial_labels_and_fast_entry => "T01_tutorial_labels_and_fast_entry.tsv",
     t02_tutorial_values_erase_and_repeating_label => "T02_tutorial_values_erase_and_repeating_label.tsv",
     t03_tutorial_calculation_and_named_ranges => "T03_tutorial_calculation_and_named_ranges.tsv",
@@ -1072,6 +1497,9 @@ transcripts! {
     t07_tutorial_file_retrieve_and_open => "T07_tutorial_file_retrieve_and_open.tsv",
     t08_tutorial_macros               => "T08_tutorial_macros.tsv",
     t09_tutorial_learn_record         => "T09_tutorial_learn_record.tsv",
+    t10_tutorial_data_sort            => "T10_tutorial_data_sort.tsv",
+    t11_tutorial_data_query           => "T11_tutorial_data_query.tsv",
+    t12_tutorial_print_macro          => "T12_tutorial_print_macro.tsv",
     m9_macro_basic_keystrokes => "M9_macro_basic_keystrokes.tsv",
     m9_macro_special_keys     => "M9_macro_special_keys.tsv",
     m9_macro_alt_letter       => "M9_macro_alt_letter.tsv",
@@ -1100,6 +1528,7 @@ transcripts! {
     m8_data_table_1           => "M8_data_table_1.tsv",
     m8_data_table_2           => "M8_data_table_2.tsv",
     m8_data_sort_extra        => "M8_data_sort_extra.tsv",
+    m10_icon_sort             => "M10_icon_sort.tsv",
     m8_data_parse_format_line => "M8_data_parse_format_line.tsv",
     m8_data_query             => "M8_data_query.tsv",
     function_renames    => "function_renames.tsv",

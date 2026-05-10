@@ -1,0 +1,92 @@
+# /Graph F10 view — Stacked Bar / Stack type rendering.
+#
+# Slice F6 of GRAPH_PLAN.md. When features.stacked = true on Bar
+# graphs, or always on Stack type, every populated A..F series
+# becomes a segment of a stacked column. Each series uses a
+# distinct shading glyph so they're visually distinguishable in
+# the unicode F10 view (and in this test):
+#   A → █, B → ▓, C → ▒, D → ░ (E/F cycle).
+# Reference p. 2-194: "Stacked Yes — Stack corresponding data-range values."
+
+SIZE 80 30
+
+# Seed A1..A3 = 3,1,2 in column A; B1..B3 = 1,3,1 in column B.
+# Use DOWN throughout for commit-and-advance.
+KEYS 3
+DOWN
+KEYS 1
+DOWN
+KEYS 2
+DOWN
+HOME
+RIGHT
+KEYS 1
+DOWN
+KEYS 3
+DOWN
+KEYS 1
+DOWN
+HOME
+ASSERT_POINTER     A:A1
+
+# /GTB type Bar.
+KEY /
+KEY G
+KEY T
+KEY B
+# /GA → A1..A3.
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  A  A:A1..A:A3
+HOME
+RIGHT
+# /GB → B1..B3.
+KEY /
+KEY G
+KEY B
+DOWN
+DOWN
+ENTER
+ASSERT_GRAPH_SERIES  B  A:B1..A:B3
+
+# Default Bar (stacked = false) clusters A and B side by side, so
+# both glyphs are visible. The visual distinction between clustered
+# and stacked is layout, not glyph presence — pinned by
+# stacked_percent_normalizes_each_column_to_full_height in
+# l123-graph::render unit tests.
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+ASSERT_SCREEN     ▓
+ESC
+
+# /GTFSY — Stacked Yes.
+KEY /
+KEY G
+KEY T
+KEY F
+KEY S
+KEY Y
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+# B series shading visible above A.
+ASSERT_SCREEN     ▓
+ESC
+
+# Stack type also renders stacked.
+KEY /
+KEY G
+KEY T
+KEY S
+ASSERT_GRAPH_TYPE  STACK
+F 10
+ASSERT_MODE       GRAPH
+ASSERT_SCREEN     █
+ASSERT_SCREEN     ▓
+ESC
+ASSERT_MODE       READY

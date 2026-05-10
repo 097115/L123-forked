@@ -1,0 +1,142 @@
+# /Graph Options Data-Labels — render label text in the F10 HLCO
+# view at the chosen placement.
+#
+# Slice F (data labels render — HLCO) of GRAPH_PLAN.md. Each H-L
+# bar gets the matching slot-A data-label cell text painted at
+# the placement offset relative to the bar's TOP (the high point).
+# Reference p. 2-217.
+
+SIZE 80 30
+
+# Seed A1..A3 = 10, 12, 14 (High).
+KEYS 10
+DOWN
+KEYS 12
+DOWN
+KEYS 14
+DOWN
+HOME
+
+# Seed B1..B3 = 4, 6, 5 (Low).
+RIGHT
+KEYS 4
+DOWN
+KEYS 6
+DOWN
+KEYS 5
+DOWN
+HOME
+
+# Seed C1..C3 = 8, 11, 12 (Close).
+RIGHT
+RIGHT
+KEYS 8
+DOWN
+KEYS 11
+DOWN
+KEYS 12
+DOWN
+HOME
+
+# Seed D1..D3 = 6, 7, 9 (Open).
+RIGHT
+RIGHT
+RIGHT
+KEYS 6
+DOWN
+KEYS 7
+DOWN
+KEYS 9
+DOWN
+HOME
+
+# Seed E1..E3 = Q1..Q3 (label text).
+RIGHT
+RIGHT
+RIGHT
+RIGHT
+KEYS Q1
+DOWN
+KEYS Q2
+DOWN
+KEYS Q3
+DOWN
+HOME
+
+# /GTH — HLCO graph type.
+KEY /
+KEY G
+KEY T
+KEY H
+
+# /GA over A1..A3 (High).
+KEY /
+KEY G
+KEY A
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GB over B1..B3 (Low).
+RIGHT
+KEY /
+KEY G
+KEY B
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GC over C1..C3 (Close).
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY C
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GD over D1..D3 (Open).
+RIGHT
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY D
+DOWN
+DOWN
+ENTER
+HOME
+
+# /GOD A over E1..E3 with placement Above.
+RIGHT
+RIGHT
+RIGHT
+RIGHT
+KEY /
+KEY G
+KEY O
+KEY D
+KEY A
+DOWN
+DOWN
+ENTER
+KEY A
+ASSERT_MODE          READY
+ASSERT_GRAPH_DATA_LABELS  A          A:E1..A:E3
+ASSERT_GRAPH_DATA_LABELS_PLACEMENT  A  Above
+
+# F10 — labels render alongside the H-L bars. The third bar's
+# High value (14) is the max for the chart, so its top sits at
+# the plot's top edge; its Above-placed label is suppressed by
+# `paint_data_label`. Q1..Q2 render above their bars.
+F 10
+ASSERT_MODE          GRAPH
+ASSERT_SCREEN        Q1
+ASSERT_SCREEN        Q2
+
+ESC
+ASSERT_MODE          READY
