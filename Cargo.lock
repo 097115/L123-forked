@@ -1708,6 +1708,7 @@ dependencies = [
  "libc",
  "ratatui",
  "ratatui-image",
+ "serde_json",
  "tokio",
  "tracing",
 ]
