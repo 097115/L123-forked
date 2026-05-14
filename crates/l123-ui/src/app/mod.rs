@@ -243,6 +243,10 @@ pub struct App {
     /// Named/Specified-Range` flow — after the filename prompt commits,
     /// the path is stashed here while the user types the source range.
     pending_combine_path: Option<PathBuf>,
+    /// Transient slot for the two-step `/File Import Sqlite` flow —
+    /// the sqlite path is stashed here while the user picks a table
+    /// from the second prompt.
+    pending_sqlite_import_path: Option<PathBuf>,
     /// Overlay state for /File List. When present, the mode is Files
     /// and the grid is obscured by a horizontal picker on lines 2/3.
     file_list: Option<FileListState>,
@@ -1177,6 +1181,7 @@ impl App {
             erase_confirm: None,
             pending_xtract_path: None,
             pending_combine_path: None,
+            pending_sqlite_import_path: None,
             file_list: None,
             name_list: None,
             help: None,
@@ -3520,6 +3525,9 @@ impl App {
             Action::FileXtractFormulas => self.start_file_xtract_prompt(XtractKind::Formulas),
             Action::FileXtractValues => self.start_file_xtract_prompt(XtractKind::Values),
             Action::FileImportNumbers => self.start_file_import_numbers_prompt(),
+            Action::FileImportJson => self.start_file_import_json_prompt(),
+            Action::FileImportParquet => self.start_file_import_parquet_prompt(),
+            Action::FileImportSqlite => self.start_file_import_sqlite_prompt(),
             Action::FileImportText => self.start_file_import_text_prompt(),
             Action::FileNew => self.execute_file_new(),
             Action::FileOpenBefore => self.start_file_open_prompt(true),
@@ -4922,6 +4930,40 @@ impl App {
         self.mode = Mode::Menu;
     }
 
+    fn start_file_import_json_prompt(&mut self) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter import file name:".into(),
+            buffer: String::new(),
+            next: PromptNext::FileImportJsonFilename,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_file_import_parquet_prompt(&mut self) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Enter import file name:".into(),
+            buffer: String::new(),
+            next: PromptNext::FileImportParquetFilename,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    fn start_file_import_sqlite_prompt(&mut self) {
+        self.menu = None;
+        self.pending_sqlite_import_path = None;
+        self.prompt = Some(PromptState {
+            label: "Enter import file name:".into(),
+            buffer: String::new(),
+            next: PromptNext::FileImportSqliteFilename,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
     fn start_file_import_text_prompt(&mut self) {
         self.menu = None;
         self.prompt = Some(PromptState {
@@ -5594,6 +5636,90 @@ impl App {
             }
         };
         self.queue_async_op("Importing", name, queued);
+    }
+
+    /// `/File Import Json` — same harness as `queue_file_import`; the
+    /// loader inside the worker (`worker_file_import_json`) auto-
+    /// detects array-of-objects vs JSON-Lines.
+    fn queue_file_import_json(&mut self, path: PathBuf) {
+        let origin = self.wb().pointer;
+        let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+        let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+        let name = display_basename(&path);
+        self.queue_async_op(
+            "Importing",
+            name,
+            QueuedOp::FileImportJson {
+                engine,
+                path,
+                origin,
+            },
+        );
+    }
+
+    /// `/File Import Parquet` — worker reads the file via
+    /// `l123_io::parquet_loader` and emits a header + typed rows.
+    fn queue_file_import_parquet(&mut self, path: PathBuf) {
+        let origin = self.wb().pointer;
+        let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+        let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+        let name = display_basename(&path);
+        self.queue_async_op(
+            "Importing",
+            name,
+            QueuedOp::FileImportParquet {
+                engine,
+                path,
+                origin,
+            },
+        );
+    }
+
+    /// Second step of `/File Import Sqlite`: synchronously list the
+    /// tables in `path` and open a second prompt for the table
+    /// choice. Listing is fast (a single `sqlite_master` query) so
+    /// it happens on the UI thread; only the actual table read is
+    /// queued async.
+    fn open_sqlite_table_prompt(&mut self, path: PathBuf) {
+        match l123_io::sqlite_loader::list_tables(&path) {
+            Ok(tables) if tables.is_empty() => {
+                self.set_error(format!(
+                    "Sqlite import: no user tables in {}",
+                    path.display()
+                ));
+            }
+            Ok(tables) => {
+                let list = tables.join(", ");
+                self.pending_sqlite_import_path = Some(path);
+                self.prompt = Some(PromptState {
+                    label: format!("Pick table ({list}):"),
+                    buffer: String::new(),
+                    next: PromptNext::FileImportSqliteTable,
+                    fresh: false,
+                });
+                self.mode = Mode::Menu;
+            }
+            Err(e) => self.set_error(format!("Sqlite import: {e}")),
+        }
+    }
+
+    /// `/File Import Sqlite` — worker reads the chosen `table` from
+    /// `path` via `l123_io::sqlite_loader::load`.
+    fn queue_file_import_sqlite(&mut self, path: PathBuf, table: String) {
+        let origin = self.wb().pointer;
+        let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
+        let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
+        let name = format!("{} ({table})", display_basename(&path));
+        self.queue_async_op(
+            "Importing",
+            name,
+            QueuedOp::FileImportSqlite {
+                engine,
+                path,
+                table,
+                origin,
+            },
+        );
     }
 
     fn commit_erase_confirm(&mut self, choice: usize) {
@@ -9237,6 +9363,43 @@ impl App {
                 }
                 let path = PathBuf::from(clean_dropped_path(&p.buffer));
                 self.queue_file_import(path, /* numeric_split = */ true);
+            }
+            PromptNext::FileImportJsonFilename => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let path = PathBuf::from(clean_dropped_path(&p.buffer));
+                self.queue_file_import_json(path);
+            }
+            PromptNext::FileImportParquetFilename => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let path = PathBuf::from(clean_dropped_path(&p.buffer));
+                self.queue_file_import_parquet(path);
+            }
+            PromptNext::FileImportSqliteFilename => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let path = PathBuf::from(clean_dropped_path(&p.buffer));
+                self.open_sqlite_table_prompt(path);
+            }
+            PromptNext::FileImportSqliteTable => {
+                if p.buffer.is_empty() {
+                    self.pending_sqlite_import_path = None;
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let Some(path) = self.pending_sqlite_import_path.take() else {
+                    self.set_error("Sqlite import: no path stashed");
+                    return;
+                };
+                let table = p.buffer.clone();
+                self.queue_file_import_sqlite(path, table);
             }
             PromptNext::FileImportTextFilename => {
                 if p.buffer.is_empty() {

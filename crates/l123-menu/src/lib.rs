@@ -383,6 +383,20 @@ pub enum Action {
     /// as a label down a single column starting at the pointer. The
     /// counterpart to `FileImportNumbers`; no CSV parsing.
     FileImportText,
+    /// `/File Import Json` (v0.4) — read an array-of-objects or
+    /// JSON-Lines file. Header row from object keys at the pointer;
+    /// data rows below. Type widening per PLAN §M11 (bool→1/0,
+    /// null→Empty, strings as labels). Errors drop to ERROR mode.
+    FileImportJson,
+    /// `/File Import Parquet` (v0.4) — read a parquet file via the
+    /// arrow row API. Header from the schema, typed cells per PLAN
+    /// §M11. Date/timestamp columns surface as raw integers (D1
+    /// format-tag plumbing is a follow-up).
+    FileImportParquet,
+    /// `/File Import Sqlite` (v0.4) — pick a SQLite file, then pick
+    /// a table within it; load that table's rows into typed cells
+    /// per PLAN §M11. Read-only.
+    FileImportSqlite,
     /// `/File Combine Copy Entire-File` — overwrite cells starting at
     /// the pointer with the contents of every non-empty cell in the
     /// source file.
@@ -3142,6 +3156,27 @@ const FILE_IMPORT_MENU: &[MenuItem] = &[
         help: "Parse CSV: numeric tokens as values, quoted strings as labels",
         help_page: "",
         body: MenuBody::Action(Action::FileImportNumbers),
+    },
+    MenuItem {
+        letter: 'J',
+        name: "Json",
+        help: "Import array-of-objects or JSON-Lines into typed cells",
+        help_page: "",
+        body: MenuBody::Action(Action::FileImportJson),
+    },
+    MenuItem {
+        letter: 'P',
+        name: "Parquet",
+        help: "Import a Parquet file; types preserved per schema",
+        help_page: "",
+        body: MenuBody::Action(Action::FileImportParquet),
+    },
+    MenuItem {
+        letter: 'S',
+        name: "Sqlite",
+        help: "Import a table from a SQLite database file",
+        help_page: "",
+        body: MenuBody::Action(Action::FileImportSqlite),
     },
 ];
 
