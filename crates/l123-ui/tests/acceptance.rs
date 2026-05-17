@@ -161,6 +161,21 @@ fn run_transcript(path: &Path) {
                 app.test_seed_async_progress(done, total);
             }
             "MACRO" => app.run_macro_text(rest),
+            // M9 v0.4 — pin the .l123log sidecar path for the next
+            // LEARN session so the transcript can assert / replay it
+            // without going through /File Save.
+            "SET_LEARN_SIDECAR_PATH" => {
+                let path = std::path::PathBuf::from(rest);
+                app.test_set_learn_sidecar_path(Some(path));
+            }
+            // M9 v0.4 — read the .l123log sidecar at `path` and
+            // dispatch each `{"keys": "..."}` token through the macro
+            // interpreter, exactly as `l123 --replay <path>` would.
+            "REPLAY" => {
+                let path = std::path::PathBuf::from(rest);
+                app.replay_sidecar(&path)
+                    .unwrap_or_else(|e| panic!("{}:{line_no}: replay: {e}", path.display()));
+            }
 
             // ---- assertions ----
             "ASSERT_POINTER" => {
@@ -1536,6 +1551,16 @@ transcripts! {
     function_emulations => "function_emulations.tsv",
     function_reload_round_trip => "function_reload_round_trip.tsv",
     function_sidecar_round_trip => "function_sidecar_round_trip.tsv",
+    m9_learn_sidecar_replay          => "M9_learn_sidecar_replay.tsv",
+    m11_import_json                  => "M11_import_json.tsv",
+    m11_import_jsonl                 => "M11_import_jsonl.tsv",
+    m11_import_json_error            => "M11_import_json_error.tsv",
+    m11_import_parquet               => "M11_import_parquet.tsv",
+    m11_import_sqlite                => "M11_import_sqlite.tsv",
+    m11_range_compare_basic          => "M11_range_compare_basic.tsv",
+    m11_range_compare_type_mismatch  => "M11_range_compare_type_mismatch.tsv",
+    m11_range_compare_size_mismatch  => "M11_range_compare_size_mismatch.tsv",
+    m11_range_compare_clean          => "M11_range_compare_clean.tsv",
 }
 
 #[cfg(feature = "wk3")]
