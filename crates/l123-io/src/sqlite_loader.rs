@@ -93,7 +93,7 @@ pub fn load(path: &Path, table: &str) -> Result<LoadedRecords, LoadError> {
         }
         rows.push(out_row);
     }
-    Ok(LoadedRecords { header, rows })
+    Ok(LoadedRecords::new(header, rows))
 }
 
 /// Run an arbitrary SQL statement against `path` and return the
