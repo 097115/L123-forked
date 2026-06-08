@@ -1,0 +1,60 @@
+# /Data External Refresh (M12 v0.4 slice 2; updated for slice 6
+# PROT enforcement). /DER re-runs the most recent /DEU query
+# against a registered source and replaces values in place,
+# leaving adjacent (unbound) cells untouched.
+
+SIZE 120 25
+
+# Connect "sales" against the existing m11_import.sqlite fixture.
+KEY /
+KEY D
+KEY E
+KEY C
+KEYS sales
+ENTER
+KEYS sqlite:tests/acceptance/fixtures/m11_import.sqlite
+ENTER
+ASSERT_MODE      READY
+
+# /DEU runs the query and writes header + 3 rows at A1..C4.
+KEY /
+KEY D
+KEY E
+KEY U
+KEYS sales
+ENTER
+KEYS SELECT id, name, qty FROM items ORDER BY id
+ENTER
+ASSERT_MODE      READY
+ASSERT_CELL      A:A2  1
+ASSERT_CELL      A:B2  widget
+
+# Drop a value into an unbound adjacent cell (column D is outside
+# the A..C bound range). Refresh must leave this untouched.
+F 5
+KEYS D2
+ENTER
+KEYS adjacent
+ENTER
+ASSERT_CELL      A:D2  adjacent
+
+# /DER refreshes the binding — re-runs the stashed query.
+KEY /
+KEY D
+KEY E
+KEY R
+ASSERT_PANEL_L3  Refresh
+KEYS sales
+ENTER
+ASSERT_MODE      READY
+
+# Bound cells re-rendered correctly.
+ASSERT_CELL      A:A2  1
+ASSERT_CELL      A:B2  widget
+ASSERT_CELL      A:C2  100
+ASSERT_CELL      A:A4  3
+ASSERT_CELL      A:B4  gizmo
+ASSERT_CELL      A:C4
+
+# Adjacent unbound cell survived the refresh.
+ASSERT_CELL      A:D2  adjacent

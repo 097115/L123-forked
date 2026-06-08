@@ -469,6 +469,32 @@ pub(super) struct Workbook {
     /// in this set are "protected" by default. Has no effect unless
     /// `super::App::global_protection` is on.
     pub(super) cell_unprotected: HashSet<Address>,
+    /// `/Data External` sources registered via `Connect` (M12 v0.4).
+    /// Keyed by lowercased source name; `Use` looks up the connection
+    /// string here and re-parses it on each query. Slice 1 keeps the
+    /// registry session-local; xlsx custom-property round-trip lands
+    /// in a later slice.
+    pub(super) external_sources: HashMap<String, ExternalSource>,
+}
+
+/// One row in the workbook's `/Data External` source registry. The
+/// connection string is stored verbatim; the typed [`DataSource`]
+/// (in `l123-io`) is recreated on demand from it so we don't have to
+/// hold a live db handle across the prompt chain.
+///
+/// `last_query` / `last_range` / `last_refreshed_at` snapshot the
+/// most recent `/Data External Use` binding so `/Data External
+/// Refresh` (M12 v0.4 slice 2) has something to re-run and
+/// `/Data External List` has timestamps to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalSource {
+    pub(super) name: String,
+    pub(super) connection: String,
+    pub(super) last_query: Option<String>,
+    pub(super) last_range: Option<Range>,
+    /// Seconds-since-Unix-epoch of the most recent `/DEU` or `/DER`.
+    /// `None` means the source has been Connect'ed but never Used.
+    pub(super) last_refreshed_at: Option<u64>,
 }
 
 impl Workbook {
@@ -539,6 +565,7 @@ impl Workbook {
             named_ranges: HashMap::new(),
             name_notes: HashMap::new(),
             cell_unprotected: HashSet::new(),
+            external_sources: HashMap::new(),
         }
     }
 }
@@ -1126,6 +1153,11 @@ pub(super) enum QueuedOp {
         path: PathBuf,
         formula_sources: HashMap<Address, String>,
         cell_format_extras: l123_io::cell_formats::CellFormatExtras,
+        /// Snapshot of the `/Data External` source registry; the
+        /// worker writes it as a sidecar inside the xlsx zip so
+        /// `/File Retrieve` can restore the bindings (M12 v0.4
+        /// slice 3).
+        external_sources: HashMap<String, l123_io::external_sources::ExternalSourceSnapshot>,
     },
     /// `/File Import Numbers` — workbook engine taken out; the
     /// worker fills it from the parsed CSV starting at `origin`.
@@ -1168,6 +1200,18 @@ pub(super) enum QueuedOp {
     },
     /// F9 recalc, gated on cell count > `super::RECALC_WAIT_CELL_THRESHOLD`.
     Recalc { engine: IronCalcEngine },
+    /// `/Data External Refresh` (M12 v0.4 slice 4) — re-run a
+    /// stashed SQL query against a registered source off the UI
+    /// thread. The engine *isn't* taken out for this op: the query
+    /// hits the external db, not the workbook, so the engine stays
+    /// in the UI's hands the whole time. Worker carries the
+    /// connection string verbatim (parser re-runs at query time).
+    DataExternalRefresh {
+        name: String,
+        connection: String,
+        sql: String,
+        origin: Address,
+    },
 }
 
 /// What the worker hands back over the oneshot. Each variant carries
@@ -1196,14 +1240,28 @@ pub(super) enum AsyncResult {
         path: PathBuf,
         result: std::result::Result<(), String>,
     },
-    /// Import op completed (text or numbers). `cells` is the run of
-    /// UI-side entries to merge into `Workbook::cells`.
+    /// Import op completed (text / numbers / json / parquet / sqlite).
+    /// `cells` are the UI-side entries to merge into `Workbook::cells`;
+    /// `formats` are the optional per-cell format overrides the
+    /// loader collected (currently used by the parquet loader to tag
+    /// date columns as `(D1)`).
     FileImport {
         engine: IronCalcEngine,
         cells: Vec<(Address, CellContents)>,
+        formats: Vec<(Address, Format)>,
     },
     /// F9 recalc done — engine carries the recomputed values.
     Recalc { engine: IronCalcEngine },
+    /// `/Data External Refresh` (M12 v0.4 slice 4) — query
+    /// completed off-thread. `name` keys back into the registry so
+    /// the apply path can update `last_range` / `last_refreshed_at`;
+    /// `origin` is the cell pointer at queue time. `result` is the
+    /// loaded records or a stringified error.
+    DataExternalRefresh {
+        name: String,
+        origin: Address,
+        result: std::result::Result<l123_io::records::LoadedRecords, String>,
+    },
     /// Worker bailed because of a cancel flag or pre-spawn check.
     /// Engine is returned so the main thread can put it back.
     Cancelled { engine: Option<IronCalcEngine> },
@@ -1274,12 +1332,30 @@ pub(super) enum PromptNext {
     /// file (v0.4).
     FileImportParquetFilename,
     /// `/File Import Sqlite` — first prompt: pick the .sqlite file.
-    /// On commit the loader lists tables and the prompt transitions
-    /// to [`FileImportSqliteTable`].
+    /// On commit the loader lists tables and opens a NAMES-style
+    /// table picker overlay (v0.4 follow-up). The picker carries
+    /// the path directly; there's no second prompt variant.
     FileImportSqliteFilename,
-    /// `/File Import Sqlite` — second prompt: pick a table from the
-    /// path stashed in `App::pending_sqlite_import_path`.
-    FileImportSqliteTable,
+    /// `/Data External Connect` (M12 v0.4) — first prompt: source
+    /// name (≤15 ASCII chars, named-range rules).
+    DataExternalConnectName,
+    /// `/Data External Connect` — second prompt: connection string
+    /// (`sqlite:<path>`). The name is stashed in
+    /// `App::pending_external_name` between the two steps.
+    DataExternalConnectString,
+    /// `/Data External Use` (M12 v0.4) — first prompt: registered
+    /// source name.
+    DataExternalUseName,
+    /// `/Data External Use` — second prompt: SQL query. The source
+    /// name is stashed in `App::pending_external_name`.
+    DataExternalUseQuery,
+    /// `/Data External Refresh` (M12 v0.4 slice 2) — one-prompt
+    /// flow: source name. Re-runs the stashed query and replaces
+    /// the bound range in place.
+    DataExternalRefreshName,
+    /// `/Data External Disconnect` (M12 v0.4 slice 5) — one-prompt
+    /// flow: source name. Drops that source from the registry.
+    DataExternalDisconnectName,
     /// After the user types a filename, read the file as plain text and
     /// paint each line as a label down a single column starting at the
     /// pointer (no CSV semantics — the whole line, including embedded
@@ -1533,6 +1609,43 @@ pub(crate) struct NameListState {
 
 pub(super) const NAME_LIST_PAGE_SIZE: usize = 10;
 
+/// `/Data External List` overlay state (M12 v0.4 slice 2). Read-only
+/// view of every registered external source with its connection
+/// string and last-refresh timestamp. Mode::Names while present;
+/// ESC closes back to READY.
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalListState {
+    /// (name, connection, last_refreshed_at) sorted ascending by
+    /// lowercased name.
+    pub(super) entries: Vec<(String, String, Option<u64>)>,
+    pub(super) highlight: usize,
+    pub(super) view_offset: usize,
+}
+
+pub(super) const EXTERNAL_LIST_PAGE_SIZE: usize = 10;
+
+/// `/File Import Sqlite` table picker (v0.4 follow-up).
+///
+/// Shares the NAMES-style overlay shape with [`NameListState`] but
+/// each entry is a plain table name — there's no `Range` to render
+/// in a second column. On Enter the picker dispatches the chosen
+/// table through `queue_file_import_sqlite` with the stashed
+/// sqlite path; on Esc it cancels back to READY.
+#[derive(Debug, Clone)]
+pub(crate) struct SqliteTablePickerState {
+    /// Tables in the sqlite file, sorted alphabetically (the same
+    /// ordering `l123_io::sqlite_loader::list_tables` returns).
+    pub(super) tables: Vec<String>,
+    pub(super) highlight: usize,
+    pub(super) view_offset: usize,
+    /// The path the user picked in the first prompt; carried here
+    /// so Enter can dispatch the async load without a separate
+    /// `pending_*_path` slot on App.
+    pub(super) path: PathBuf,
+}
+
+pub(super) const SQLITE_TABLE_PICKER_PAGE_SIZE: usize = 10;
+
 impl PromptNext {
     pub(super) fn accepts_char(self, c: char) -> bool {
         match self {
@@ -1568,7 +1681,10 @@ impl PromptNext {
             | PromptNext::FileImportJsonFilename
             | PromptNext::FileImportParquetFilename
             | PromptNext::FileImportSqliteFilename
-            | PromptNext::FileImportSqliteTable
+            | PromptNext::DataExternalConnectName
+            | PromptNext::DataExternalUseName
+            | PromptNext::DataExternalRefreshName
+            | PromptNext::DataExternalDisconnectName
             | PromptNext::FileEraseFilename
             | PromptNext::FileCombineFilename { .. }
             | PromptNext::FileDirPath
@@ -1584,6 +1700,13 @@ impl PromptNext {
             PromptNext::PrintFileHeader
             | PromptNext::PrintFileFooter
             | PromptNext::PrintFileSetup => c != '\n' && c != '\t',
+            // `/Data External` connection strings (`sqlite:<path>`,
+            // `postgres://…`) and free-form SQL bodies need colons,
+            // slashes, parens, commas, etc. Accept any non-control
+            // printable, same shape as Print Header/Footer.
+            PromptNext::DataExternalConnectString | PromptNext::DataExternalUseQuery => {
+                c != '\n' && c != '\t'
+            }
             // CUPS queue names are conventionally alphanumeric with
             // `_`/`-`; reject whitespace so a stray space doesn't end
             // up as part of the `lp -d` argument.

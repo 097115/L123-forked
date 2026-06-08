@@ -1039,6 +1039,31 @@ pub enum Action {
     /// Shared by every `/Data External` leaf — no external
     /// database driver is configured in L123.
     DataExternalStub,
+    /// `/Data External Connect` (M12 v0.4) — register a named
+    /// external data source. Prompts for name + connection string;
+    /// tests connectivity before adding it to the workbook's source
+    /// registry.
+    DataExternalConnect,
+    /// `/Data External Use` (M12 v0.4) — run a SQL query against a
+    /// registered source and write the result starting at the cell
+    /// pointer.
+    DataExternalUse,
+    /// `/Data External Refresh` (M12 v0.4) — re-run the stashed
+    /// query against a source and replace the output range's values
+    /// in place. Synchronous in slice 2; WAIT-mode async lands when
+    /// postgres does.
+    DataExternalRefresh,
+    /// `/Data External List` (M12 v0.4) — overlay listing every
+    /// registered source with its connection string and last-refresh
+    /// timestamp. Read-only; ESC dismisses.
+    DataExternalList,
+    /// `/Data External Disconnect` (M12 v0.4 slice 5) — drop a
+    /// single named source from the workbook's registry.
+    DataExternalDisconnect,
+    /// `/Data External Reset` (M12 v0.4 slice 5) — drop every
+    /// registered source. Letter `S` (reSet) because `R` is taken
+    /// by Refresh.
+    DataExternalReset,
 }
 
 /// Resolve a path of letter accelerators from the root menu.  Returns
@@ -5731,53 +5756,46 @@ const DATA_MATRIX_MENU: &[MenuItem] = &[
 
 const DATA_EXTERNAL_MENU: &[MenuItem] = &[
     MenuItem {
+        letter: 'C',
+        name: "Connect",
+        help: "Register a named external data source (v0.4)",
+        help_page: "0194-data-external-create.html",
+        body: MenuBody::Action(Action::DataExternalConnect),
+    },
+    MenuItem {
         letter: 'U',
         name: "Use",
-        help: "Connect to an external database driver",
+        help: "Run SQL against a registered source; result at pointer",
         help_page: "0212-data-external-use.html",
-        body: MenuBody::Action(Action::DataExternalStub),
+        body: MenuBody::Action(Action::DataExternalUse),
+    },
+    MenuItem {
+        letter: 'R',
+        name: "Refresh",
+        help: "Re-run the stashed query and replace the bound range",
+        help_page: "0211-data-external-reset.html",
+        body: MenuBody::Action(Action::DataExternalRefresh),
     },
     MenuItem {
         letter: 'L',
         name: "List",
-        help: "List available external tables / fields",
+        help: "Overlay listing every registered source",
         help_page: "0191-data-external-list.html",
-        body: MenuBody::Action(Action::DataExternalStub),
+        body: MenuBody::Action(Action::DataExternalList),
     },
     MenuItem {
-        letter: 'C',
-        name: "Create",
-        help: "Create an external table",
-        help_page: "0194-data-external-create.html",
-        body: MenuBody::Action(Action::DataExternalStub),
+        letter: 'S',
+        name: "Reset",
+        help: "Drop every registered source",
+        help_page: "0211-data-external-reset.html",
+        body: MenuBody::Action(Action::DataExternalReset),
     },
     MenuItem {
         letter: 'D',
-        name: "Delete",
-        help: "Delete an external table",
+        name: "Disconnect",
+        help: "Drop a single registered source by name",
         help_page: "0206-data-external-delete.html",
-        body: MenuBody::Action(Action::DataExternalStub),
-    },
-    MenuItem {
-        letter: 'O',
-        name: "Other",
-        help: "Driver-specific options (Send / Translation)",
-        help_page: "0207-data-external-other.html",
-        body: MenuBody::Action(Action::DataExternalStub),
-    },
-    MenuItem {
-        letter: 'R',
-        name: "Reset",
-        help: "Disconnect all external tables",
-        help_page: "0211-data-external-reset.html",
-        body: MenuBody::Action(Action::DataExternalStub),
-    },
-    MenuItem {
-        letter: 'Q',
-        name: "Quit",
-        help: "Return to READY",
-        help_page: "",
-        body: MenuBody::Action(Action::DataExternalStub),
+        body: MenuBody::Action(Action::DataExternalDisconnect),
     },
 ];
 
@@ -7571,8 +7589,9 @@ mod tests {
                 "D M {c} should be a leaf"
             );
         }
-        // External → Use, List, Create, Delete, Other, Reset, Quit
-        for c in ['U', 'L', 'C', 'D', 'O', 'R', 'Q'] {
+        // External → Connect, Use, Refresh, List, reSet, Disconnect
+        // (M12 v0.4 layout; Reset uses S since R is taken by Refresh).
+        for c in ['C', 'U', 'R', 'L', 'S', 'D'] {
             let n = resolve(&['D', 'E', c]).unwrap_or_else(|| panic!("D E {c}"));
             assert!(
                 matches!(n.body, MenuBody::NotImplemented(_) | MenuBody::Action(_)),

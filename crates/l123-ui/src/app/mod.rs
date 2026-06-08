@@ -61,10 +61,12 @@ use types::{
     IconPanelGeom, JournalEntry, LabelDirection, MacroState, MenuState, PendingAsyncOp,
     PendingCommand, PointState, PrintDestination, PrintSession, PromptNext, PromptState, QueuedOp,
     SaveConfirmState, SearchScope, SearchSession, SortDir, SortKeySlot, StatView, Workbook,
-    FILE_LIST_PAGE_SIZE, NAME_LIST_PAGE_SIZE,
+    EXTERNAL_LIST_PAGE_SIZE, FILE_LIST_PAGE_SIZE, NAME_LIST_PAGE_SIZE,
+    SQLITE_TABLE_PICKER_PAGE_SIZE,
 };
 pub(crate) use types::{
-    CombineKind, FileListKind, FileListState, NameListOrigin, NameListState, TitlesKind, XtractKind,
+    CombineKind, ExternalListState, ExternalSource, FileListKind, FileListState, NameListOrigin,
+    NameListState, SqliteTablePickerState, TitlesKind, XtractKind,
 };
 pub use types::GraphTitleSlot;
 
@@ -243,10 +245,11 @@ pub struct App {
     /// Named/Specified-Range` flow — after the filename prompt commits,
     /// the path is stashed here while the user types the source range.
     pending_combine_path: Option<PathBuf>,
-    /// Transient slot for the two-step `/File Import Sqlite` flow —
-    /// the sqlite path is stashed here while the user picks a table
-    /// from the second prompt.
-    pending_sqlite_import_path: Option<PathBuf>,
+    /// Transient slot shared by the two-step `/Data External Connect`
+    /// and `/Data External Use` flows (M12 v0.4). Holds the source
+    /// name typed in the first prompt while the user types the
+    /// connection string / SQL in the second.
+    pending_external_name: Option<String>,
     /// Overlay state for /File List. When present, the mode is Files
     /// and the grid is obscured by a horizontal picker on lines 2/3.
     file_list: Option<FileListState>,
@@ -254,6 +257,15 @@ pub struct App {
     /// the grid is obscured by a vertical name picker. Underlying
     /// POINT / prompt state is preserved so dismissal returns to it.
     name_list: Option<NameListState>,
+    /// Overlay state for `/File Import Sqlite`'s table picker (v0.4
+    /// follow-up). Mirrors `name_list` but the entries are bare
+    /// strings — there's no range to render in a second column.
+    /// Mode is Names while this is `Some`; dismissal returns to READY.
+    sqlite_table_picker: Option<SqliteTablePickerState>,
+    /// Overlay state for `/Data External List` (M12 v0.4 slice 2).
+    /// Read-only view of every registered external source. Mode is
+    /// Names while this is `Some`; ESC dismisses.
+    external_list: Option<ExternalListState>,
     /// Overlay state for F1 HELP. Some while the help overlay is open;
     /// underlying mode is restored on Esc.
     help: Option<HelpState>,
@@ -843,6 +855,59 @@ fn value_to_cell_contents(v: &Value) -> Option<CellContents> {
     }
 }
 
+/// Dimensions of the cell range a `/Data External Use` write occupies,
+/// given the result `records` and the user-pointed `origin`. Header
+/// claims one row; data rows follow. An empty header (degenerate query)
+/// collapses to a single-cell range.
+fn external_range_from_origin(
+    origin: Address,
+    records: &l123_io::records::LoadedRecords,
+) -> Range {
+    if records.header.is_empty() {
+        return Range::single(origin);
+    }
+    let cols = records.header.len() as u16;
+    let rows = (records.rows.len() as u32) + 1; // +1 for header
+    Range {
+        start: origin,
+        end: Address::new(
+            origin.sheet,
+            origin.col + cols - 1,
+            origin.row + rows - 1,
+        ),
+    }
+}
+
+/// Inverse of `external_sources_snapshot` — rebuild an [`ExternalSource`]
+/// from the driver-agnostic shape `l123-io::external_sources` reads off
+/// disk. Used by `repopulate_after_xlsx_load` after `/File Retrieve`.
+fn ext_source_from_snapshot(
+    snap: l123_io::external_sources::ExternalSourceSnapshot,
+) -> ExternalSource {
+    let range = snap.last_range.map(|r| Range {
+        start: Address::new(SheetId(r.sheet), r.start_col, r.start_row),
+        end: Address::new(SheetId(r.sheet), r.end_col, r.end_row),
+    });
+    ExternalSource {
+        name: snap.name,
+        connection: snap.connection,
+        last_query: snap.last_query,
+        last_range: range,
+        last_refreshed_at: snap.last_refreshed_at,
+    }
+}
+
+/// Seconds since the Unix epoch, saturating at 0 on a clock skew
+/// (no real system goes pre-1970, but `SystemTime::duration_since`
+/// is technically fallible). Used for `last_refreshed_at` and the
+/// `/Data External List` overlay.
+fn unix_seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Greedy word-wrap of `text` into chunks no wider than `width`
 /// columns. Words longer than `width` are emitted on their own line
 /// and may exceed the limit (1-2-3 R3.4a same-cell behavior — long
@@ -987,6 +1052,22 @@ fn adjust_name_list_view(nl: &mut NameListState) {
         nl.view_offset = nl.highlight;
     } else if nl.highlight >= nl.view_offset + NAME_LIST_PAGE_SIZE {
         nl.view_offset = nl.highlight + 1 - NAME_LIST_PAGE_SIZE;
+    }
+}
+
+fn adjust_sqlite_table_picker_view(p: &mut SqliteTablePickerState) {
+    if p.highlight < p.view_offset {
+        p.view_offset = p.highlight;
+    } else if p.highlight >= p.view_offset + SQLITE_TABLE_PICKER_PAGE_SIZE {
+        p.view_offset = p.highlight + 1 - SQLITE_TABLE_PICKER_PAGE_SIZE;
+    }
+}
+
+fn adjust_external_list_view(el: &mut ExternalListState) {
+    if el.highlight < el.view_offset {
+        el.view_offset = el.highlight;
+    } else if el.highlight >= el.view_offset + EXTERNAL_LIST_PAGE_SIZE {
+        el.view_offset = el.highlight + 1 - EXTERNAL_LIST_PAGE_SIZE;
     }
 }
 
@@ -1189,9 +1270,11 @@ impl App {
             erase_confirm: None,
             pending_xtract_path: None,
             pending_combine_path: None,
-            pending_sqlite_import_path: None,
+            pending_external_name: None,
             file_list: None,
             name_list: None,
+            sqlite_table_picker: None,
+            external_list: None,
             help: None,
             active_files: vec![Workbook::new()],
             current: 0,
@@ -1495,8 +1578,28 @@ impl App {
         self.start_name_prompt("Enter address to go to:", PromptNext::Goto);
     }
 
+    /// `true` when `addr` falls inside any registered external
+    /// source's `last_range` (M12 v0.4 slice 6). External-bound
+    /// cells light the `PROT` indicator and refuse direct edit so
+    /// the user can't desynchronize the worksheet from its source
+    /// of truth — they have to go through `/DER` or `/DED`.
+    pub(super) fn addr_is_externally_bound(&self, addr: Address) -> bool {
+        self.wb().external_sources.values().any(|src| {
+            src.last_range
+                .map(|r| r.normalized().contains(addr))
+                .unwrap_or(false)
+        })
+    }
+
     fn begin_edit(&mut self) {
         let pointer = self.wb().pointer;
+        if self.addr_is_externally_bound(pointer) {
+            self.set_error(format!(
+                "{} is externally bound; use /Data External Refresh to update it",
+                pointer.display_full()
+            ));
+            return;
+        }
         let source = self
             .wb()
             .cells
@@ -1613,6 +1716,16 @@ impl App {
         // label-prefix chars (`'`/`"`/`^`/`\`/`|`) still pick their
         // own prefix — the user is being explicit, so honor them.
         let pointer = self.wb().pointer;
+        // M12 v0.4 slice 6 — external-bound cells refuse direct edit;
+        // the user has to go through `/Data External Refresh` or
+        // `/Data External Disconnect` to mutate them.
+        if self.addr_is_externally_bound(pointer) {
+            self.set_error(format!(
+                "{} is externally bound; use /Data External Refresh to update it",
+                pointer.display_full()
+            ));
+            return;
+        }
         let label_only = matches!(
             self.wb().cell_formats.get(&pointer).copied(),
             Some(f) if matches!(f.kind, FormatKind::LabelOnly)
@@ -4084,6 +4197,12 @@ impl App {
             Action::DataExternalStub => {
                 self.set_error("Data External: no external-database driver configured")
             }
+            Action::DataExternalConnect => self.start_data_external_connect_prompt(),
+            Action::DataExternalUse => self.start_data_external_use_prompt(),
+            Action::DataExternalRefresh => self.start_data_external_refresh_prompt(),
+            Action::DataExternalList => self.open_external_list(),
+            Action::DataExternalDisconnect => self.start_data_external_disconnect_prompt(),
+            Action::DataExternalReset => self.execute_data_external_reset(),
         }
     }
 
@@ -4399,6 +4518,7 @@ impl App {
         self.wb_mut().hidden_cols.clear();
         self.wb_mut().named_ranges.clear();
         self.wb_mut().name_notes.clear();
+        self.wb_mut().external_sources.clear();
         self.entry = None;
         self.menu = None;
         self.prompt = None;
@@ -4878,6 +4998,7 @@ impl App {
             named_ranges: HashMap::new(),
             name_notes: HashMap::new(),
             cell_unprotected: HashSet::new(),
+            external_sources: HashMap::new(),
         };
         // If the active sheet is hidden / very-hidden, redirect to the
         // first visible sheet so the user lands somewhere they can
@@ -4964,7 +5085,6 @@ impl App {
 
     fn start_file_import_sqlite_prompt(&mut self) {
         self.menu = None;
-        self.pending_sqlite_import_path = None;
         self.prompt = Some(PromptState {
             label: "Enter import file name:".into(),
             buffer: String::new(),
@@ -4972,6 +5092,97 @@ impl App {
             fresh: false,
         });
         self.mode = Mode::Menu;
+    }
+
+    /// `/Data External Connect` — first prompt: name. The second
+    /// prompt (connection string) opens after this commits.
+    fn start_data_external_connect_prompt(&mut self) {
+        self.menu = None;
+        self.pending_external_name = None;
+        self.prompt = Some(PromptState {
+            label: "Enter connection name:".into(),
+            buffer: String::new(),
+            next: PromptNext::DataExternalConnectName,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data External Use` — first prompt: pick a registered source
+    /// by name. The second prompt (SQL) opens after this commits.
+    fn start_data_external_use_prompt(&mut self) {
+        self.menu = None;
+        self.pending_external_name = None;
+        self.prompt = Some(PromptState {
+            label: "Enter source name:".into(),
+            buffer: String::new(),
+            next: PromptNext::DataExternalUseName,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data External Refresh` — one-prompt flow: source name. The
+    /// commit handler re-runs the stashed query and replaces the
+    /// bound range's values in place.
+    /// `/Data External List` — open the read-only NAMES-style overlay
+    /// enumerating every registered source.
+    fn open_external_list(&mut self) {
+        self.menu = None;
+        let mut entries: Vec<(String, String, Option<u64>)> = self
+            .wb()
+            .external_sources
+            .values()
+            .map(|s| (s.name.clone(), s.connection.clone(), s.last_refreshed_at))
+            .collect();
+        entries.sort_by_key(|(name, _, _)| name.to_ascii_lowercase());
+        self.external_list = Some(ExternalListState {
+            entries,
+            highlight: 0,
+            view_offset: 0,
+        });
+        self.mode = Mode::Names;
+    }
+
+    fn start_data_external_refresh_prompt(&mut self) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Refresh which source:".into(),
+            buffer: String::new(),
+            next: PromptNext::DataExternalRefreshName,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data External Disconnect` — one-prompt flow that drops a
+    /// single named source from the registry. The cell range the
+    /// binding wrote stays put; only the *registration* is removed,
+    /// matching the R3.4a "Disconnect" semantics described in
+    /// SPEC §10.
+    fn start_data_external_disconnect_prompt(&mut self) {
+        self.menu = None;
+        self.prompt = Some(PromptState {
+            label: "Disconnect which source:".into(),
+            buffer: String::new(),
+            next: PromptNext::DataExternalDisconnectName,
+            fresh: false,
+        });
+        self.mode = Mode::Menu;
+    }
+
+    /// `/Data External Reset` — drop the entire source registry.
+    /// No confirm prompt in v0.4 (user has Esc to back out of the
+    /// menu before the leaf fires). Same in-place semantics as
+    /// Disconnect: the cell values previously written by /Use stay
+    /// where they are.
+    fn execute_data_external_reset(&mut self) {
+        self.menu = None;
+        if !self.wb().external_sources.is_empty() {
+            self.wb_mut().external_sources.clear();
+            self.wb_mut().dirty = true;
+        }
+        self.mode = Mode::Ready;
     }
 
     fn start_file_import_text_prompt(&mut self) {
@@ -5258,6 +5469,7 @@ impl App {
         self.wb_mut().hidden_cols.clear();
         self.wb_mut().named_ranges.clear();
         self.wb_mut().name_notes.clear();
+        self.wb_mut().external_sources.clear();
         self.entry = None;
         self.wb_mut().pointer = Address::A1;
         self.wb_mut().viewport_col_offset = 0;
@@ -5296,6 +5508,17 @@ impl App {
         }
         for (addr, raw) in self.wb_mut().engine.used_cell_format_strings() {
             self.wb_mut().cell_format_overrides.insert(addr, raw);
+        }
+        // /Data External sidecar — restore the workbook's bound
+        // sources so /Refresh, /List etc. light up on reload (M12
+        // v0.4 slice 3). Missing sidecar (vanilla Excel xlsx, or an
+        // older L123 file) yields an empty registry.
+        if let Ok(snaps) = l123_io::external_sources::read_from_xlsx(&path) {
+            for (key, snap) in snaps {
+                self.wb_mut()
+                    .external_sources
+                    .insert(key, ext_source_from_snapshot(snap));
+            }
         }
         // Layer the cell-format-extras sidecar on top of the engine's
         // num_fmt-based view (kind override for non-Excel kinds, parens
@@ -5606,6 +5829,7 @@ impl App {
         self.push_ui_overrides_into_engine();
         let formula_sources = self.formula_sources_snapshot();
         let cell_format_extras = self.cell_format_extras_snapshot();
+        let external_sources = self.external_sources_snapshot();
         let placeholder = IronCalcEngine::new().expect("IronCalc placeholder engine init");
         let engine = std::mem::replace(&mut self.wb_mut().engine, placeholder);
         let name = display_basename(&path);
@@ -5617,8 +5841,50 @@ impl App {
                 path,
                 formula_sources,
                 cell_format_extras,
+                external_sources,
             },
         );
+    }
+
+    /// Convert the live `Workbook::external_sources` registry into the
+    /// driver-agnostic snapshot shape `l123-io::external_sources`
+    /// persists. Called on `/File Save`; the inverse runs in
+    /// `repopulate_after_xlsx_load`.
+    fn external_sources_snapshot(
+        &self,
+    ) -> HashMap<String, l123_io::external_sources::ExternalSourceSnapshot> {
+        self.wb()
+            .external_sources
+            .iter()
+            .map(|(key, src)| {
+                let range = src.last_range.map(|r| {
+                    let n = r.normalized();
+                    l123_io::external_sources::RangeSnapshot {
+                        sheet: n.start.sheet.0,
+                        start_col: n.start.col,
+                        start_row: n.start.row,
+                        end_col: n.end.col,
+                        end_row: n.end.row,
+                    }
+                });
+                (
+                    key.clone(),
+                    l123_io::external_sources::ExternalSourceSnapshot {
+                        name: src.name.clone(),
+                        // M12 v0.4 slice 4b — passwords stay in
+                        // memory; the on-disk sidecar carries the
+                        // bare URL so xlsx files can travel between
+                        // hosts / users without leaking credentials.
+                        // Reconnect resolves via the libpq
+                        // PGPASSWORD env var (or re-/DEC).
+                        connection: l123_io::ext_source::strip_credentials(&src.connection),
+                        last_query: src.last_query.clone(),
+                        last_range: range,
+                        last_refreshed_at: src.last_refreshed_at,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Queue an async `/File Import {Numbers,Text}`. Engine is
@@ -5686,10 +5952,10 @@ impl App {
     }
 
     /// Second step of `/File Import Sqlite`: synchronously list the
-    /// tables in `path` and open a second prompt for the table
-    /// choice. Listing is fast (a single `sqlite_master` query) so
-    /// it happens on the UI thread; only the actual table read is
-    /// queued async.
+    /// tables in `path` and open a NAMES-style overlay so the user
+    /// picks one with the arrow keys. Listing is fast (a single
+    /// `sqlite_master` query) so it happens on the UI thread; only
+    /// the actual table read is queued async.
     fn open_sqlite_table_prompt(&mut self, path: PathBuf) {
         match l123_io::sqlite_loader::list_tables(&path) {
             Ok(tables) if tables.is_empty() => {
@@ -5699,15 +5965,13 @@ impl App {
                 ));
             }
             Ok(tables) => {
-                let list = tables.join(", ");
-                self.pending_sqlite_import_path = Some(path);
-                self.prompt = Some(PromptState {
-                    label: format!("Pick table ({list}):"),
-                    buffer: String::new(),
-                    next: PromptNext::FileImportSqliteTable,
-                    fresh: false,
+                self.sqlite_table_picker = Some(SqliteTablePickerState {
+                    tables,
+                    highlight: 0,
+                    view_offset: 0,
+                    path,
                 });
-                self.mode = Mode::Menu;
+                self.mode = Mode::Names;
             }
             Err(e) => self.set_error(format!("Sqlite import: {e}")),
         }
@@ -5730,6 +5994,61 @@ impl App {
                 origin,
             },
         );
+    }
+
+    /// `/Data External Refresh` — queue the async query against
+    /// the registered source (M12 v0.4 slice 4). The engine is
+    /// *not* taken out: the query hits the external db, not the
+    /// workbook, so the UI keeps reading the existing cells while
+    /// the worker runs.
+    fn queue_data_external_refresh(
+        &mut self,
+        name: String,
+        connection: String,
+        sql: String,
+        origin: Address,
+    ) {
+        let display = name.clone();
+        self.queue_async_op(
+            "Refreshing",
+            display,
+            QueuedOp::DataExternalRefresh {
+                name,
+                connection,
+                sql,
+                origin,
+            },
+        );
+    }
+
+    /// Apply the result of a queued `/Data External Refresh`. On
+    /// success, replaces the bound range's values starting at
+    /// `origin` and updates the registry's `last_range` /
+    /// `last_refreshed_at`. On error, drops to ERROR mode and leaves
+    /// the workbook untouched.
+    fn apply_data_external_refresh(
+        &mut self,
+        name: String,
+        origin: Address,
+        result: std::result::Result<l123_io::records::LoadedRecords, String>,
+    ) {
+        let records = match result {
+            Ok(r) => r,
+            Err(msg) => {
+                if msg == "cancelled" {
+                    return;
+                }
+                self.set_error(format!("Refresh {name:?}: {msg}"));
+                return;
+            }
+        };
+        let written_range = external_range_from_origin(origin, &records);
+        self.write_external_records(origin, &records);
+        let key = name.to_ascii_lowercase();
+        if let Some(entry) = self.wb_mut().external_sources.get_mut(&key) {
+            entry.last_range = Some(written_range);
+            entry.last_refreshed_at = Some(unix_seconds_now());
+        }
     }
 
     fn commit_erase_confirm(&mut self, choice: usize) {
@@ -8655,6 +8974,49 @@ impl App {
         self.finish_range_write(writes);
     }
 
+    /// `/Data External Use` — write the result of a query starting at
+    /// `origin`. Header at row 0, values below. Slice 1 keeps the
+    /// write synchronous (sqlite is fast); WAIT-mode async refresh
+    /// lands with `/DER` in a later slice. Goes through
+    /// `write_cell_with_undo` so Alt-F4 can revert the binding write.
+    fn write_external_records(&mut self, origin: Address, records: &l123_io::records::LoadedRecords) {
+        let mut writes: Vec<(Address, Option<CellContents>)> = Vec::new();
+        for (dc, h) in records.header.iter().enumerate() {
+            let addr = Address::new(origin.sheet, origin.col + dc as u16, origin.row);
+            self.write_cell_with_undo(
+                addr,
+                CellContents::Label {
+                    prefix: LabelPrefix::Apostrophe,
+                    text: h.clone(),
+                },
+                &mut writes,
+            );
+        }
+        for (dr, row) in records.rows.iter().enumerate() {
+            for (dc, v) in row.iter().enumerate() {
+                let addr = Address::new(
+                    origin.sheet,
+                    origin.col + dc as u16,
+                    origin.row + 1 + dr as u32,
+                );
+                let contents = match v {
+                    Value::Empty => continue,
+                    Value::Number(n) => CellContents::Constant(Value::Number(*n)),
+                    Value::Text(s) => CellContents::Label {
+                        prefix: LabelPrefix::Apostrophe,
+                        text: s.clone(),
+                    },
+                    Value::Bool(b) => {
+                        CellContents::Constant(Value::Number(if *b { 1.0 } else { 0.0 }))
+                    }
+                    Value::Error(_) => continue,
+                };
+                self.write_cell_with_undo(addr, contents, &mut writes);
+            }
+        }
+        self.finish_range_write(writes);
+    }
+
     fn finish_range_write(&mut self, writes: Vec<(Address, Option<CellContents>)>) {
         if writes.is_empty() {
             return;
@@ -9398,18 +9760,166 @@ impl App {
                 let path = PathBuf::from(clean_dropped_path(&p.buffer));
                 self.open_sqlite_table_prompt(path);
             }
-            PromptNext::FileImportSqliteTable => {
+            PromptNext::DataExternalConnectName => {
                 if p.buffer.is_empty() {
-                    self.pending_sqlite_import_path = None;
                     self.mode = Mode::Ready;
                     return;
                 }
-                let Some(path) = self.pending_sqlite_import_path.take() else {
-                    self.set_error("Sqlite import: no path stashed");
+                let name = p.buffer.trim().to_string();
+                if !l123_io::ext_source::is_valid_source_name(&name) {
+                    self.set_error(format!(
+                        "Connect: source name {name:?} must be 1-15 chars, \
+                         starting with a letter or underscore"
+                    ));
+                    return;
+                }
+                self.pending_external_name = Some(name);
+                self.prompt = Some(PromptState {
+                    label: "Enter connection string (sqlite:<path>):".into(),
+                    buffer: String::new(),
+                    next: PromptNext::DataExternalConnectString,
+                    fresh: false,
+                });
+                self.mode = Mode::Menu;
+            }
+            PromptNext::DataExternalConnectString => {
+                if p.buffer.is_empty() {
+                    self.pending_external_name = None;
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let Some(name) = self.pending_external_name.take() else {
+                    self.set_error("Connect: no name stashed");
                     return;
                 };
-                let table = p.buffer.clone();
-                self.queue_file_import_sqlite(path, table);
+                let conn = p.buffer.trim().to_string();
+                let source = match l123_io::ext_source::parse_connection_string(&conn) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_error(format!("Connect {name:?}: {e}"));
+                        return;
+                    }
+                };
+                if let Err(e) = source.test_connection() {
+                    self.set_error(format!("Connect {name:?}: {e}"));
+                    return;
+                }
+                let key = name.to_ascii_lowercase();
+                self.wb_mut().external_sources.insert(
+                    key,
+                    ExternalSource {
+                        name: name.clone(),
+                        connection: conn,
+                        last_query: None,
+                        last_range: None,
+                        last_refreshed_at: None,
+                    },
+                );
+                self.wb_mut().dirty = true;
+                self.mode = Mode::Ready;
+            }
+            PromptNext::DataExternalUseName => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let name = p.buffer.trim().to_string();
+                if !self
+                    .wb()
+                    .external_sources
+                    .contains_key(&name.to_ascii_lowercase())
+                {
+                    self.set_error(format!(
+                        "Use: no source named {name:?} (try /Data External Connect first)"
+                    ));
+                    return;
+                }
+                self.pending_external_name = Some(name);
+                self.prompt = Some(PromptState {
+                    label: "Enter SQL:".into(),
+                    buffer: String::new(),
+                    next: PromptNext::DataExternalUseQuery,
+                    fresh: false,
+                });
+                self.mode = Mode::Menu;
+            }
+            PromptNext::DataExternalUseQuery => {
+                if p.buffer.is_empty() {
+                    self.pending_external_name = None;
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let Some(name) = self.pending_external_name.take() else {
+                    self.set_error("Use: no source stashed");
+                    return;
+                };
+                let key = name.to_ascii_lowercase();
+                let Some(src) = self.wb().external_sources.get(&key).cloned() else {
+                    self.set_error(format!("Use: source {name:?} disappeared"));
+                    return;
+                };
+                let sql = p.buffer.clone();
+                let source = match l123_io::ext_source::parse_connection_string(&src.connection)
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.set_error(format!("Use {name:?}: {e}"));
+                        return;
+                    }
+                };
+                let records = match source.query(&sql) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.set_error(format!("Use {name:?}: {e}"));
+                        return;
+                    }
+                };
+                let origin = self.wb().pointer;
+                let written_range = external_range_from_origin(origin, &records);
+                self.write_external_records(origin, &records);
+                if let Some(entry) = self.wb_mut().external_sources.get_mut(&key) {
+                    entry.last_query = Some(sql);
+                    entry.last_range = Some(written_range);
+                    entry.last_refreshed_at = Some(unix_seconds_now());
+                }
+                self.mode = Mode::Ready;
+            }
+            PromptNext::DataExternalRefreshName => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let name = p.buffer.trim().to_string();
+                let key = name.to_ascii_lowercase();
+                let Some(src) = self.wb().external_sources.get(&key).cloned() else {
+                    self.set_error(format!("Refresh: no source named {name:?}"));
+                    return;
+                };
+                let Some(sql) = src.last_query.clone() else {
+                    self.set_error(format!(
+                        "Refresh {name:?}: never bound (run /Data External Use first)"
+                    ));
+                    return;
+                };
+                let Some(origin) = src.last_range.map(|r| r.start) else {
+                    self.set_error(format!("Refresh {name:?}: no binding range stashed"));
+                    return;
+                };
+                self.queue_data_external_refresh(name, src.connection.clone(), sql, origin);
+            }
+            PromptNext::DataExternalDisconnectName => {
+                if p.buffer.is_empty() {
+                    self.mode = Mode::Ready;
+                    return;
+                }
+                let name = p.buffer.trim().to_string();
+                let key = name.to_ascii_lowercase();
+                if self.wb_mut().external_sources.remove(&key).is_none() {
+                    self.set_error(format!("Disconnect: no source named {name:?}"));
+                    return;
+                }
+                self.wb_mut().dirty = true;
+                self.mode = Mode::Ready;
             }
             PromptNext::FileImportTextFilename => {
                 if p.buffer.is_empty() {

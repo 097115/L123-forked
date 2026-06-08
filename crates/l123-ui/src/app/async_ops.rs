@@ -145,6 +145,7 @@ impl App {
                 path,
                 formula_sources,
                 cell_format_extras,
+                external_sources,
             } => {
                 self.runtime.spawn_blocking(move || {
                     let _ = tx.send(worker_file_save(
@@ -152,6 +153,7 @@ impl App {
                         path,
                         formula_sources,
                         cell_format_extras,
+                        external_sources,
                         progress,
                     ));
                 });
@@ -211,6 +213,18 @@ impl App {
             QueuedOp::Recalc { engine } => {
                 self.runtime.spawn_blocking(move || {
                     let _ = tx.send(worker_recalc(engine, progress));
+                });
+            }
+            QueuedOp::DataExternalRefresh {
+                name,
+                connection,
+                sql,
+                origin,
+            } => {
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(worker_data_external_refresh(
+                        name, connection, sql, origin, progress,
+                    ));
                 });
             }
         }
@@ -282,10 +296,17 @@ impl App {
                     self.set_error(format!("Cannot save: {msg}"));
                 }
             }
-            AsyncResult::FileImport { engine, cells } => {
+            AsyncResult::FileImport {
+                engine,
+                cells,
+                formats,
+            } => {
                 self.wb_mut().engine = engine;
                 for (a, c) in cells {
                     self.wb_mut().cells.insert(a, c);
+                }
+                for (a, f) in formats {
+                    self.wb_mut().cell_formats.insert(a, f);
                 }
                 self.refresh_formula_caches();
             }
@@ -304,6 +325,13 @@ impl App {
                     self.wb_mut().engine = e;
                 }
                 self.set_error(message);
+            }
+            AsyncResult::DataExternalRefresh {
+                name,
+                origin,
+                result,
+            } => {
+                self.apply_data_external_refresh(name, origin, result);
             }
         }
     }
@@ -361,7 +389,9 @@ impl App {
     /// success metadata so the workbook looks like nothing happened.
     fn restore_engine_only(&mut self, res: AsyncResult) {
         let engine = match res {
-            AsyncResult::FileRetrieveXlsx { .. } | AsyncResult::FileRetrieveCsv { .. } => None,
+            AsyncResult::FileRetrieveXlsx { .. }
+            | AsyncResult::FileRetrieveCsv { .. }
+            | AsyncResult::DataExternalRefresh { .. } => None,
             AsyncResult::FileSave { engine, .. }
             | AsyncResult::FileImport { engine, .. }
             | AsyncResult::Recalc { engine } => Some(engine),
@@ -545,6 +575,7 @@ fn worker_file_save(
     path: std::path::PathBuf,
     formula_sources: HashMap<Address, String>,
     cell_format_extras: l123_io::cell_formats::CellFormatExtras,
+    external_sources: HashMap<String, l123_io::external_sources::ExternalSourceSnapshot>,
     progress: AsyncProgress,
 ) -> AsyncResult {
     if progress.cancel.load(Ordering::Relaxed) {
@@ -566,6 +597,7 @@ fn worker_file_save(
     }
     let _ = l123_io::formula_sources::write_to_xlsx(&path, &formula_sources);
     let _ = l123_io::cell_formats::write_to_xlsx(&path, &cell_format_extras);
+    let _ = l123_io::external_sources::write_to_xlsx(&path, &external_sources);
     AsyncResult::FileSave {
         engine,
         path,
@@ -652,7 +684,11 @@ fn worker_file_import(
         }
     }
     engine.recalc();
-    AsyncResult::FileImport { engine, cells }
+    AsyncResult::FileImport {
+        engine,
+        cells,
+        formats: Vec::new(),
+    }
 }
 
 /// `/File Import Json` worker (v0.4). Reads the file off the UI
@@ -733,6 +769,7 @@ where
     progress.total.store(total.max(1), Ordering::Relaxed);
 
     let mut cells: Vec<(Address, CellContents)> = Vec::new();
+    let mut formats: Vec<(Address, l123_core::Format)> = Vec::new();
     for (dc, h) in records.header.iter().enumerate() {
         let addr = Address::new(origin.sheet, origin.col + dc as u16, origin.row);
         let engine_input = format!("'{h}");
@@ -759,12 +796,13 @@ where
                 origin.col + dc as u16,
                 origin.row + 1 + dr as u32,
             );
-            match v {
-                Value::Empty => continue,
+            let wrote = match v {
+                Value::Empty => false,
                 Value::Number(n) => {
                     let s = l123_core::format_number_general(*n);
                     let _ = engine.set_user_input(addr, &s);
                     cells.push((addr, CellContents::Constant(Value::Number(*n))));
+                    true
                 }
                 Value::Text(s) => {
                     let engine_input = format!("'{s}");
@@ -776,20 +814,35 @@ where
                             text: s.clone(),
                         },
                     ));
+                    true
                 }
                 Value::Bool(b) => {
                     let n = if *b { 1.0 } else { 0.0 };
                     let s = l123_core::format_number_general(n);
                     let _ = engine.set_user_input(addr, &s);
                     cells.push((addr, CellContents::Constant(Value::Number(n))));
+                    true
                 }
-                Value::Error(_) => continue,
+                Value::Error(_) => false,
+            };
+            // Apply the per-column format hint (parquet date columns
+            // tag themselves as (D1)). Skipped for cells we didn't
+            // write so we don't paint format on stale neighbors.
+            if wrote {
+                if let Some(Some(fmt)) = records.column_formats.get(dc) {
+                    let _ = engine.set_cell_format(addr, *fmt);
+                    formats.push((addr, *fmt));
+                }
             }
         }
         progress.done.store(2 + dr as u64, Ordering::Relaxed);
     }
     engine.recalc();
-    AsyncResult::FileImport { engine, cells }
+    AsyncResult::FileImport {
+        engine,
+        cells,
+        formats,
+    }
 }
 
 /// §4.7 worker — F9 recalc on a workbook above `super::RECALC_WAIT_CELL_THRESHOLD`.
@@ -804,4 +857,36 @@ fn worker_recalc(mut engine: IronCalcEngine, progress: AsyncProgress) -> AsyncRe
     }
     engine.recalc();
     AsyncResult::Recalc { engine }
+}
+
+/// `/Data External Refresh` worker (M12 v0.4 slice 4). Re-parses
+/// the connection string into a [`DataSource`] and runs the stashed
+/// SQL off the UI thread. The result rides back through
+/// `AsyncResult::DataExternalRefresh` and the apply path writes the
+/// records and updates the registry's `last_range` /
+/// `last_refreshed_at`. Cancel is honored before the query; once the
+/// driver has the connection, the call is opaque.
+fn worker_data_external_refresh(
+    name: String,
+    connection: String,
+    sql: String,
+    origin: Address,
+    progress: AsyncProgress,
+) -> AsyncResult {
+    if progress.cancel.load(Ordering::Relaxed) {
+        return AsyncResult::DataExternalRefresh {
+            name,
+            origin,
+            result: Err("cancelled".into()),
+        };
+    }
+    let result = match l123_io::ext_source::parse_connection_string(&connection) {
+        Ok(s) => s.query(&sql).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    AsyncResult::DataExternalRefresh {
+        name,
+        origin,
+        result,
+    }
 }

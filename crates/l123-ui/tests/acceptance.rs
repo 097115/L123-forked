@@ -1561,6 +1561,14 @@ transcripts! {
     m11_range_compare_type_mismatch  => "M11_range_compare_type_mismatch.tsv",
     m11_range_compare_size_mismatch  => "M11_range_compare_size_mismatch.tsv",
     m11_range_compare_clean          => "M11_range_compare_clean.tsv",
+    m12_external_sqlite_connect      => "M12_external_sqlite_connect.tsv",
+    m12_external_refresh             => "M12_external_refresh.tsv",
+    m12_external_list                => "M12_external_list.tsv",
+    m12_external_xlsx_roundtrip      => "M12_external_xlsx_roundtrip.tsv",
+    m12_external_refresh_wait        => "M12_external_refresh_wait.tsv",
+    m12_external_disconnect          => "M12_external_disconnect.tsv",
+    m12_external_reset               => "M12_external_reset.tsv",
+    m12_external_protected           => "M12_external_protected.tsv",
 }
 
 #[cfg(feature = "wk3")]
